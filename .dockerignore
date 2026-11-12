@@ -1,0 +1,10 @@
+.git
+.idea
+target
+docs
+*.log
+.env
+.env.*
+**/node_modules
+**/dist
+KitchenFlow_Operations_Screens/.git
