@@ -1,0 +1,16 @@
+import React from "react"
+import ReactDOM from "react-dom/client"
+import { AppRoot } from "./app/AppRoot"
+import "./styles/reset.css"
+import "./styles/tokens.css"
+import "./styles/typography.css"
+import "./styles/shell-1.css"
+import "./styles/shell-2.css"
+import "./styles/shell-3.css"
+import "./styles/shell-4.css"
+import "./styles/shell-5.css"
+import "./styles/kds.css"
+import "./styles/operations-flow.css"
+import "./styles/admin-flow.css"
+
+ReactDOM.createRoot(document.getElementById("root")!).render(<React.StrictMode><AppRoot /></React.StrictMode>)

@@ -1,0 +1,197 @@
+/* New shell geometry and mandatory operational typography */
+.role-pos, .role-payment { min-height: 0; }
+.role-pos .pos-layout { height: 100%; }
+.role-payment .payment-layout { height: 100%; }
+.station-bound { padding: 17px 22px; border-right: 1px solid var(--line); color: var(--muted); font-size: 14px; line-height: 1.4; }
+.station-bound strong { color: var(--ink); font-size: 20px; }
+.operational-screen .eyebrow,
+.operational-screen .station-identity span,
+.operational-screen .open-count span,
+.operational-screen .connection small,
+.operational-screen .live-clock span,
+.operational-screen .panel-heading span,
+.operational-screen .late-ticket small { font-size: 14px; }
+.operational-screen .type-badge,
+.operational-screen .order-status,
+.operational-screen .state-chip,
+.operational-screen .rush-indicator,
+.operational-screen .no-action { font-size: 14px; }
+.operational-screen .sla span { font-size: 14px; }
+.operational-screen .kitchen-item > span { font-size: 20px; }
+.operational-screen .order-note { font-size: 20px; font-weight: 700; }
+.operational-screen .order-note.allergy { border-color: var(--red); background: #412521; color: white; }
+.operational-screen .order-note strong { font-size: 14px; }
+.operational-screen .cancelled-card > p,
+.operational-screen .cancel-reason span,
+.operational-screen .recall-block > span,
+.operational-screen .availability-row span,
+.operational-screen .availability-toggle { font-size: 14px; }
+.operational-screen .manager-title span,
+.operational-screen .metric span,
+.operational-screen .late-ticket > div b { font-size: 14px; }
+.manager-screen .order-row { min-height: 126px; font-size: 14px; }
+.manager-screen .order-row.table-head { min-height: 44px; font-size: 14px; }
+.manager-screen .state-chip { min-height: 38px; padding: 0 8px; }
+.manager-screen .station-chips { grid-template-columns: repeat(2, minmax(145px, 1fr)); }
+
+/* Keep the manager board inside the viewport. The old table tracks forced a
+   1040px canvas into the live-orders panel and made the columns overlap. */
+.manager-screen { min-width: 0; overflow: hidden; }
+.manager-top { height: 88px; min-height: 88px; grid-template-columns: minmax(0, 1fr) minmax(132px, 160px) minmax(132px, 160px); }
+.manager-title { min-width: 0; padding: 16px 18px; }
+.manager-title h1 { font-size: 30px; }
+.manager-grid { grid-template-columns: minmax(0, 1.65fr) minmax(240px, .85fr); min-width: 0; }
+.orders-panel, .order-table, .manager-aside { min-width: 0; }
+.order-row { min-width: 0; grid-template-columns: 54px minmax(96px, 1fr) 86px minmax(128px, 1.35fr) minmax(96px, .9fr) 58px; gap: 8px; padding-inline: 10px; }
+.order-row > span:nth-child(2) { min-width: 0; overflow-wrap: anywhere; }
+.station-chips { min-width: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.state-chip { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.order-row > .icon-button { min-width: 0; width: 100%; padding: 0; }
+.late-ticket { min-width: 0; grid-template-columns: 40px minmax(0, 1fr); padding-inline: 12px; }
+.late-ticket > div { min-width: 0; }
+.late-ticket > div strong { overflow-wrap: anywhere; }
+
+@media (max-width: 1100px) {
+  .manager-grid { grid-template-columns: minmax(0, 1.45fr) minmax(220px, .8fr); }
+  .order-row { grid-template-columns: 48px minmax(82px, 1fr) 76px minmax(112px, 1.25fr) minmax(82px, .8fr) 50px; gap: 5px; padding-inline: 8px; }
+  .manager-screen .order-row { font-size: 12px; }
+  .manager-screen .order-row.table-head { font-size: 11px; }
+  .manager-screen .state-chip { min-height: 32px; padding-inline: 5px; font-size: 11px; }
+}
+.rush-indicator { display: flex; flex-direction: column; align-items: center; gap: 4px; color: var(--muted); }
+.rush-indicator.on { color: var(--ink); }
+.no-action { color: var(--muted); text-align: center; }
+.public-status { height: 100vh; min-height: 720px; }
+.public-status .outlet span, .public-status .status-clock span, .public-status .waiting-label, .public-status .status-footer { font-size: 14px; }
+.public-status .token-grid { overflow: hidden; }
+.public-status .preparing-grid { grid-template-columns: repeat(4, 1fr); grid-template-rows: repeat(4, 1fr); }
+.public-status .ready-grid { grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(2, 1fr); }
+.warning-box.restore { color: #24573a; background: #d9eadf; border-color: #6d9c7c; }
+.cart-line.line-unavailable, .cart-line.line-short { border-left: 2px solid #a5443a; background: #f4e1de; }
+.cart-line.line-short { border-left-color: #9d762c; background: #f2e8d2; }
+.bill-lines div > span { display: flex; flex-direction: column; }
+.bill-lines div > span small { color: #6b6e6c; }
+.order-status.completed { color: var(--green); border-color: #397651; }
+.cancel-modal footer .confirm-cancel:disabled { background: #8a4a44; color: #3a1b18; border-color: #8a4a44; cursor: not-allowed; opacity: .7; }
+
+/* Admin station configuration */
+.station-config-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; padding: 20px; }
+.station-config-card { padding: 24px; border: 1px solid #bbb9b2; background: white; }
+.config-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid #d4d2cb; }
+.config-card-header h2 { margin: 0; font: 800 24px 'Barlow Condensed'; letter-spacing: .06em; }
+.station-config-card label { display: block; margin: 14px 0; color: #606462; font-size: 9px; font-weight: 700; letter-spacing: .09em; }
+.station-config-card input { width: 100%; min-height: 48px; margin-top: 6px; padding: 0 11px; border: 1px solid #aaa9a3; background: #fdfcf8; }
+.mapped-items-section { margin-top: 18px; padding-top: 14px; border-top: 1px solid #d4d2cb; }
+.mapped-items-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.mapped-chip { display: inline-flex; align-items: center; height: 32px; padding: 0 10px; border: 1px solid #aaa9a3; background: #efeee9; font-size: 11px; font-weight: 600; }
+.dev-password-hint { cursor: default; color: #888; }
+.manager-stations-shell { height: 100%; }
+.manager-stations-tabs { padding: 14px 22px; }
+.boot-screen { min-height: 100vh; display: grid; place-items: center; background: var(--dark); color: var(--ink); }
+.boot-card { width: min(520px, calc(100vw - 40px)); padding: 36px; border: 1px solid var(--line); background: var(--panel); text-align: center; }
+.boot-card .login-mark { margin: 0 auto 24px; }
+.boot-card h1 { margin: 14px 0 8px; font: 700 30px 'Barlow Condensed'; letter-spacing: .05em; }
+.boot-card p, .boot-card small { display: block; color: var(--muted); }
+.boot-progress { height: 8px; margin: 28px 0 12px; background: var(--line); text-align: left; }
+.boot-progress i { display: block; height: 100%; background: var(--green); }
+.boot-progress-size-8 i { width: 8%; }.boot-progress-size-22 i { width: 22%; }.boot-progress-size-70 i { width: 70%; }.boot-progress-size-100 i { width: 100%; }
+.boot-actions { display: flex; gap: 10px; margin-top: 20px; }.boot-actions button { min-height: 44px; flex: 1; border: 1px solid var(--line); background: var(--ink); color: var(--dark); font-weight: 700; }
+.boot-session { min-height: 100vh; display: grid; place-items: center; background: var(--dark); color: var(--ink); }
+
+/* Visual parity for the refactored screen markup. */
+.login-panel { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.login-panel form { order: 1; transform: translateY(-18px); }
+.login-user-chips { order: 2; width: min(420px, 76%); margin-top: 6px; padding-top: 16px; border-top: 1px solid #bdbbb4; transform: translateY(-18px); }
+.login-user-chips button { min-height: 36px; margin-right: 6px; padding: 0 9px; border: 1px solid #aaa9a3; background: transparent; color: #454846; font: 600 11px 'Barlow Condensed'; }
+
+/* Staff sign-in and generated-ID signup */
+.auth-screen { min-height: 100vh; grid-template-columns: minmax(320px, .82fr) minmax(500px, 1.18fr); }
+.auth-brand { min-height: 100vh; padding: clamp(40px, 7vw, 112px); }
+.auth-brand-note { display: flex; align-items: center; gap: 10px; margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--line); color: #c2c5c2; font-size: 11px; font-weight: 700; letter-spacing: .1em; }
+.auth-brand-note i { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px #56b77a26; }
+.auth-panel { min-height: 100vh; display: grid; place-items: center; padding: 42px clamp(28px, 7vw, 92px); background: #e9e8e2; color: #181a1b; }
+.auth-content { width: min(460px, 100%); }
+.auth-tabs { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid #c3c1ba; }
+.auth-tabs button { min-height: 48px; border: 0; border-bottom: 3px solid transparent; background: transparent; color: #626663; font-size: 11px; font-weight: 700; letter-spacing: .08em; }
+.auth-tabs button.active { border-bottom-color: #202324; color: #181a1b; }
+.auth-heading { margin: 32px 0 24px; }
+.auth-heading h2 { margin: 0; font: 700 38px/1.05 'Barlow Condensed'; }
+.auth-heading p { max-width: 42ch; margin: 8px 0 0; color: #585d5a; font-size: 14px; line-height: 1.5; }
+.auth-form { width: 100%; }
+.auth-form label { display: block; margin: 17px 0; color: #4d524f; font-size: 10px; font-weight: 700; letter-spacing: .1em; }
+.auth-form input:not([type='checkbox']), .auth-form select { width: 100%; min-height: 52px; margin-top: 7px; padding: 0 14px; border: 1px solid #a4a39d; border-radius: 0; background: #fffefa; color: #17191a; font-size: 14px; letter-spacing: 0; }
+.auth-form input::placeholder { color: #707571; opacity: 1; }
+.auth-form select { appearance: auto; }
+.auth-submit { min-height: 56px; justify-content: space-between; margin-top: 10px; padding: 0 18px; }
+.auth-submit:hover:not(:disabled) { background: #343839; }
+.auth-submit:disabled { cursor: wait; }
+
+@media (max-width: 800px) {
+  .auth-screen { grid-template-columns: 1fr; }
+  .auth-brand { min-height: 0; padding: 28px 30px 26px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .auth-brand .login-mark { width: 48px; height: 48px; margin-bottom: 20px; font-size: 24px; }
+  .auth-brand h1 { margin: 8px 0; font-size: 54px; line-height: .82; }
+  .auth-brand > p { margin: 8px 0 0; font-size: 14px; }
+  .auth-brand-note { margin-top: 20px; padding-top: 12px; }
+  .auth-panel { min-height: 0; padding: 34px 24px 48px; }
+}
+
+@media (max-width: 420px) {
+  .auth-panel { padding-inline: 18px; }
+  .auth-heading h2 { font-size: 34px; }
+}
+.order-type-tabs { display: flex; align-self: stretch; margin-left: 24px; }
+.order-type-tabs button { min-width: 105px; padding: 0 13px; border: 0; border-left: 1px solid #c4c3bd; background: transparent; color: #5c605e; font-size: 11px; font-weight: 700; letter-spacing: .04em; }
+.order-type-tabs button.active { color: #111; background: #e5e3dc; box-shadow: inset 0 -3px var(--dark); }
+.catalog-search { width: min(260px, 28vw); height: 44px; margin-left: auto; padding: 0 12px; border: 1px solid #bdbcb6; background: var(--white); color: #17191a; }
+.category-tabs { height: 58px; flex: none; display: flex; background: #e5e3dc; border-bottom: 1px solid #c5c3bc; padding: 7px 14px 0; gap: 2px; overflow-x: auto; }
+.category-tabs button { min-width: 105px; padding: 0 13px; border: 0; background: transparent; color: #5c605e; font-size: 14px; font-weight: 700; letter-spacing: .04em; }
+.category-tabs button.active { color: #111; background: var(--white); border: 1px solid #c4c3bd; border-bottom-color: var(--white); }
+.product-grid > button { position: relative; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; text-align: left; padding: 15px 12px 12px; border: 1px solid #bbb9b2; background: var(--white); color: #17191a; }
+.product-grid > button:hover:not(:disabled) { border: 2px solid #262828; padding: 14px 11px 11px; }
+.product-grid > button > strong { margin: 14px 0 5px; font-size: 16px; line-height: 1.12; }
+.product-grid > button > b { margin-top: auto; font: 700 18px 'Barlow Condensed'; font-variant-numeric: tabular-nums; }
+.product-grid > button > small { margin-top: 4px; padding: 3px 5px; color: var(--white); background: #474a49; font-size: 9px; font-weight: 700; }
+.cart-line > strong { min-width: 0; font-size: 13px; line-height: 1.15; }
+.cart-line > span { font: 700 15px 'Barlow Condensed'; }
+.cart-line > button { min-height: 38px; border: 1px solid #b9b8b1; background: #ecebe6; color: #343735; font-size: 9px; font-weight: 700; }
+.cart > textarea { min-height: 38px; margin: 8px 14px; padding: 9px 10px; border: 1px solid #bbb9b2; background: var(--white); resize: vertical; }
+.modifier-sheet fieldset { margin: 0; padding: 16px 24px; border: 0; border-bottom: 1px solid #d3d1ca; }
+.modifier-sheet legend { padding: 0; font: 700 16px 'Barlow Condensed'; letter-spacing: .06em; }
+.modifier-sheet fieldset > div { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 10px; }
+.modifier-sheet fieldset button { min-height: 52px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border: 1px solid #d3d1ca; background: var(--white); color: #17191a; text-align: left; }
+.modifier-sheet fieldset button.selected { border: 2px solid #242728; background: #efeee9; }
+.modifier-sheet fieldset button small { color: #666; font-size: 10px; }
+.payment-method-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 10px 0 24px; }
+.payment-method-tabs button { min-height: 72px; border: 1px solid #aaa9a3; background: var(--white); color: #17191a; font-weight: 700; letter-spacing: .07em; }
+.payment-method-tabs button.active { border: 3px solid #202324; padding: 0; }
+.tendered-field { display: block; margin-top: 22px; color: #17191a; font-size: 10px; font-weight: 700; letter-spacing: .1em; }
+.tendered-field input { width: 100%; height: 76px; margin-top: 7px; padding: 0 20px; border: 2px solid #242728; background: var(--white); text-align: right; font: 700 44px 'Barlow Condensed'; }
+.tendered-field small { display: block; margin-top: 8px; color: #5c615e; font-size: 12px; letter-spacing: .04em; }
+.bill-screen { min-height: 0; height: 100%; overflow: auto; padding: 20px 24px; }
+.bill-screen .page-header { padding: 0 0 18px; }
+.bill-screen .bill-lines { max-width: 720px; margin: 0 auto; padding: 18px 0; border-top: 1px dashed #777; }
+.bill-screen .bill-lines > div { min-height: 52px; align-items: center; border-bottom: 1px dashed #d3d1ca; }
+.bill-total { display: flex; align-items: center; gap: 18px; max-width: 720px; margin: 0 auto; padding-top: 18px; border-top: 1px solid #555; font-size: 16px; }
+.bill-total strong { margin-left: auto; font: 700 24px 'Barlow Condensed'; }
+.bill-total button { margin-left: 12px; }
+.public-status .preparing-column .token-grid { grid-template-columns: repeat(4, 1fr); grid-template-rows: repeat(4, 1fr); }
+.public-status .ready-column .token-grid { grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(2, 1fr); gap: 18px; }
+.public-status .ready-column .token-tile { position: relative; border: 2px solid #d9d7cf; background: #202425; font-size: 112px; }
+.public-status .ready-column .token-tile strong { font: inherit; }
+.public-status::after { content: 'WATCH FOR YOUR TOKEN NUMBER'; height: 58px; flex: none; display: flex; align-items: center; justify-content: center; border-top: 1px solid #35393a; color: #aaaead; font-size: 14px; letter-spacing: .05em; }
+.loading-screen { display: grid; place-items: center; padding: 32px; color: #666a68; font-weight: 700; letter-spacing: .08em; }
+
+/* Keep dense operational screens aligned in embedded and narrow viewports. */
+.shell-user > button { min-width: 82px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 0 8px; font-size: 10px; font-weight: 700; letter-spacing: .04em; white-space: nowrap; }
+.shell-user > button::before { content: ''; width: 16px; height: 16px; flex: none; background: currentColor; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10 4H4v16h6'/%3E%3Cpath d='m14 8 4 4-4 4M8 12h10'/%3E%3C/svg%3E") center / contain no-repeat; }
+.availability-row { display: grid; grid-template-columns: minmax(0, 1fr) 150px 106px; gap: 16px; }
+.availability-row > div { min-width: 0; }
+.availability-row > div strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.availability-row > strong { text-align: right; font-variant-numeric: tabular-nums; }
+.ticket { min-height: 0; }
+.ticket-head { min-height: 126px; }
+.product-grid > button { min-height: 92px; }
+.product-grid > button > strong { margin-top: 10px; }
+
+

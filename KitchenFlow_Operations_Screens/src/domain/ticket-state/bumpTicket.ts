@@ -1,0 +1,2 @@
+import type { Order } from "../core.types"
+export function bumpTicket(order: Order, station: Order["tickets"][number]["station"], at: number) { const tickets = order.tickets.map((ticket) => ticket.station === station ? { ...ticket, status: "READY" as const, completedAt: at } : ticket); const ready = tickets.filter((ticket) => ticket.status !== "CANCELLED").every((ticket) => ["READY", "DONE", "SERVED"].includes(ticket.status)); return { ...order, status: ready ? "READY" as const : order.status, readyAt: ready ? at : order.readyAt, tickets } }

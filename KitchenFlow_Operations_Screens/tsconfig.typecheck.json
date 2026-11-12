@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "types": [], "typeRoots": [], "jsx": "preserve", "skipLibCheck": true },
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts", "vite.config.ts"]
+}

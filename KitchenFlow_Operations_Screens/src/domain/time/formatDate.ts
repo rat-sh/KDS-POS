@@ -1,0 +1,1 @@
+export function formatDate(date: Date, weekday = false) { return new Intl.DateTimeFormat("en-IN", weekday ? { weekday: "long", day: "2-digit", month: "short", year: "numeric" } : { day: "2-digit", month: "short", year: "numeric" }).format(date).toUpperCase() }
