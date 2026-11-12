@@ -1,0 +1,1 @@
+export function SimplePage({ title }: { title: string }) { return <main className="workspace-screen"><header className="page-header"><div><span>OPERATIONS</span><h1>{title}</h1></div></header></main> }
