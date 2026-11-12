@@ -1,0 +1,11 @@
+import type { Order, PaymentMethod, TicketStatus } from "../domain/core.types"
+import type { ApiOrder } from "./api.types"
+import { businessDayKey } from "../domain/time/businessDayKey"
+import { stationNameById } from "./stationRegistry"
+
+export function mapApiOrder(order: ApiOrder): Order {
+  const tickets = order.tickets.map((ticket) => ({ id: String(ticket.id), station: stationNameById(ticket.stationId), status: ticket.status === "IN_PROGRESS" ? "COOKING" as const : ticket.status === "DONE" ? "READY" as const : ticket.status as TicketStatus, acceptedAt: ticket.acceptedAt ? Date.parse(ticket.acceptedAt) : undefined, startedAt: ticket.startedAt ? Date.parse(ticket.startedAt) : undefined, completedAt: ticket.doneAt ? Date.parse(ticket.doneAt) : undefined, servedAt: ticket.servedAt ? Date.parse(ticket.servedAt) : undefined, acknowledgedAt: ticket.cancelledAcknowledgedAt ? Date.parse(ticket.cancelledAcknowledgedAt) : undefined, version: ticket.version }))
+  const paymentMethod: PaymentMethod | undefined = order.payment?.method === "CASH" ? "Cash" : order.payment?.method === "UPI" ? "UPI" : order.payment?.method === "CARD" ? "Card" : undefined
+  const createdAt = Date.parse(order.createdAt)
+  return { id: String(order.id), token: order.token, table: order.table ?? undefined, type: order.orderType, status: order.status, createdAt, businessDay: businessDayKey(createdAt), paidAt: order.paidAt ? Date.parse(order.paidAt) : undefined, readyAt: order.readyAt ? Date.parse(order.readyAt) : undefined, completedAt: order.completedAt ? Date.parse(order.completedAt) : undefined, rush: order.rush, priority: order.priority, priorityReason: order.priorityReason ?? undefined, note: order.note ?? undefined, cancellation: order.cancellation ? { reason: order.cancellation.reason, detail: order.cancellation.detail ?? "", actor: String(order.cancellation.actor ?? ""), cancelledAt: Date.parse(order.cancellation.cancelledAt) } : undefined, lines: order.lines.map((line) => ({ itemId: String(line.itemId), qty: line.quantity, modifierIds: (line.modifiers ?? line.modifierIds ?? []).map((modifier) => typeof modifier === "number" || typeof modifier === "string" ? String(modifier) : String(modifier.modifierId)) })), tickets, payment: paymentMethod ? { method: paymentMethod, reference: order.payment?.reference ?? undefined } : undefined, version: order.version }
+}

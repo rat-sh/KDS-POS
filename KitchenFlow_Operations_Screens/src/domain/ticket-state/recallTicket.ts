@@ -1,0 +1,2 @@
+import type { Order } from "../core.types"
+export function recallTicket(order: Order, station: Order["tickets"][number]["station"], at: number, windowSeconds: number) { const ticket = order.tickets.find((entry) => entry.station === station); if (!ticket?.completedAt || at - ticket.completedAt >= windowSeconds * 1000) return order; return { ...order, status: "IN_KITCHEN" as const, readyAt: undefined, tickets: order.tickets.map((entry) => entry.station === station ? { ...entry, status: "COOKING" as const, completedAt: undefined } : entry) } }
