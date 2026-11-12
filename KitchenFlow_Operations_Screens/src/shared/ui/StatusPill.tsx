@@ -1,0 +1,2 @@
+import { Icon } from "./Icon"
+export function StatusPill({ status }: { status: string }) { const icon = status === "READY" || status === "DONE" || status === "COMPLETED" ? "check" : status.includes("PROGRESS") || status === "IN_KITCHEN" ? "play" : status === "CANCELLED" ? "x" : "clock"; return <span className={`order-status ${status.toLowerCase()}`}><Icon name={icon} size={16} />{status.replace(/_/g, " ")}</span> }

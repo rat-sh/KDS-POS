@@ -1,0 +1,2 @@
+@import 'tailwindcss';
+@layer base { *, *::before, *::after { box-sizing: border-box; } body { margin: 0; font-family: 'Barlow', sans-serif; } button, input, select, textarea { font: inherit; } }
