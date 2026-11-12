@@ -1,0 +1,2159 @@
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  System Architecture Document: KitchenFlow
+  Restaurant Order & Kitchen Display System
+  Document ID: KF-SAD-001 · Version 0.1 (draft) · 29 October 2026 · Author: Rathi · Related:
+  KF-PDD-001 (Product Development), KF-SRS-001 (Requirements)
+
+
+  1. Introduction
+
+  1.1 Purpose
+  This document describes the architecture that satisfies KitchenFlow's requirements (KF-
+  SRS-001): its structure, technology, runtime behaviour and data, and the cross-cutting
+  concerns that keep it correct and fast under load: request pipeline, caching, rate limiting,
+  concurrency control, security, reliability and observability. It is document 3 of 7. It is
+  written at high-level-design depth, with low-level detail where the design is risky or subtle
+  (sections 5, 6, 9 and 16). Documents 4 (database), 5 (API), 6 (low-level design) and 7
+  (tests) refine it.
+
+
+  1.2 Scope
+  In scope: one restaurant outlet, one application server, one PostgreSQL database,
+  browser-based clients and a reverse proxy. Out of scope: multi-outlet or multi-region
+  operation, external integrations and hardware. The scale-out path is described in sections
+  5.6 and 11 but is not built in version 1.
+
+
+  1.3 Decisions closed by this document
+
+     Open issue (SRS section                           Decision                                           Section
+     14)
+
+     OI-02 Client UI technology                        React single-page app built with Vite and served   3.4
+                                                       by Nginx. Plain HTML and JavaScript against the
+                                                       same API is the fallback.
+
+     OI-03 Database                                    PostgreSQL                                         3.4
+
+
+  All other decisions are recorded as ADR-01 to ADR-14 in section 14. Changes this design
+  proposes to the SRS are listed in section 15.2 and applied through the SRS change control.
+
+
+
+                                                                                                                Page 1 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  1.4 Conventions
+  Figures are referred to as Figure n. Library versions are deliberately not fixed here: pin the
+  current stable releases when the project starts and record them in the README. Limits
+  and timeouts quoted in this document are defaults held in configuration.
+
+
+  2. Architecture drivers
+
+  2.1 Quality attributes in priority order
+
+     Driver                                             Source in the SRS             Architectural response
+
+     1. Correctness under                               NFR-CONC-01 to 04, FR-PAY-    PostgreSQL is the single
+     concurrency: no duplicate,                         03, FR-KDS-06, FR-KDS-07      source of truth; compare-
+     lost or double-updated                                                           and-set updates, unique
+     orders                                                                           constraints, row locks,
+                                                                                      optimistic versions and an
+                                                                                      idempotency store (section
+                                                                                      6)
+
+     2. Real-time visibility within                     NFR-PERF-02, FR-KDS-05        After-commit domain events
+     1 second                                                                         feed an in-memory SSE hub;
+                                                                                      clients merge by version and
+                                                                                      resynchronise on reconnect
+                                                                                      (section 9)
+
+     3. Auditability and access                         FR-AUD-01 to 04, FR-AUTH-     Audit written in the same
+     control                                            01 to 04                      transaction; layered
+                                                                                      authorization (section 10)
+
+     4. Protection against abuse                        FR-AUTH-06, RATE_LIMITED,     Two-layer rate limiting,
+     and overload                                       NFR-PERF-01                   connection caps, explicit
+                                                                                      timeouts, bulkheads and
+                                                                                      load shedding (section 5)
+
+     5. Fast reads                                      FR-MENU-06, NFR-PERF-03       In-process cache and ETags
+                                                        and 04                        for reference data; indexes
+                                                                                      and SQL aggregation for lists
+                                                                                      and reports (sections 5 and
+                                                                                      8)
+
+
+
+
+                                                                                                               Page 2 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Driver                                             Source in the SRS                     Architectural response
+
+     6. Simple to run and explain                       NFR-POR-01, PDD goal G6               Modular monolith, three
+                                                                                              containers, every choice
+                                                                                              justified by an ADR
+
+
+
+  2.2 Constraints
+  Java, Spring Boot and SQL are fixed by the project's purpose. One developer, so every
+  added component must earn its place. No external APIs. Synthetic data only, so there is no
+  customer personal data to protect, but staff credentials and the audit trail still are.
+
+
+  2.3 Load model
+
+     Quantity                                 Value                                   Basis
+
+     Peak orders                              150 per hour, about 0.04                SRS section 2.5
+                                              per second
+
+     API calls per order                      About 15                                Menu read, create, pay, several ticket
+     lifecycle                                                                        actions, board refresh, hand-over
+
+     Steady peak API                          Under 1 request per                     150 x 15 / 3,600 = 0.63 per second,
+     traffic                                  second                                  plus screen refreshes
+
+     Long-lived                               About 7 SSE streams                     5 stations, manager board, status
+     connections                                                                      board
+
+     Load-test target                         50 concurrent users                     NFR-PERF-01; more than 50 times
+                                                                                      the real peak
+
+
+  Real traffic is tiny. The load tests exist to expose concurrency bugs and prove headroom,
+  not to size hardware. The architecture therefore spends its effort on correctness and
+  protection (limits, timeouts, caps) rather than on horizontal scale.
+
+
+
+
+                                                                                                                            Page 3 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  3. Architecture overview
+
+  3.1 Style
+  KitchenFlow is a modular monolith: one deployable Spring Boot application, organised as
+  feature modules with enforced boundaries, layered inside each module. Modules talk
+  through small interfaces and in-process domain events. PostgreSQL is the only stateful
+  component. The application itself keeps only three in-memory structures (the cache, the
+  rate-limit buckets and the SSE connections), and all three are safe to lose on restart.
+
+
+  3.2 Principles
+
+     #          Principle                                                             Consequence
+
+     P1         The database decides; the cache only                                  Order validation and pricing always read
+                displays.                                                             the database; caches serve screens.
+
+     P2         One business operation is one short                                   No remote calls and no SSE sends inside
+                transaction.                                                          a transaction.
+
+     P3         State changes only through the state                                  Controllers and repositories cannot set a
+                machine.                                                              status directly.
+
+     P4         Push after commit.                                                    Screens never see uncommitted or
+                                                                                      rolled-back data.
+
+     P5         Fail closed for security, fail open for                               A broken cache or limiter does not take
+                performance aids.                                                     the system down; a broken auth check
+                                                                                      does.
+
+     P6         Every limit and timeout is explicit and                               No unbounded queues, pools or waits.
+                configurable.
+
+     P7         Idempotent writes.                                                    Retries are safe by design.
+
+     P8         Observable by default.                                                Correlation ID, metrics and structured
+                                                                                      logs from the first endpoint.
+
+     P9         Simple first, with a documented scale                                 No Redis, broker or microservices until a
+                path.                                                                 requirement needs them.
+
+     P10        Boundaries are tested, not trusted.                                   An architecture test enforces module
+                                                                                      rules (NFR-MNT-01).
+
+
+
+
+                                                                                                                            Page 4 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  3.3 Technology stack
+
+     Layer                                Choice                                      Reason
+
+     Language and                         Java 21 (17 minimum)                        LTS release; records and
+     runtime                                                                          modern syntax
+
+     Application                          Spring Boot 3.x: Web MVC,                   Standard in enterprise Java
+     framework                            Validation, Security, Data JPA,
+                                          Actuator
+
+     Database                             PostgreSQL 16 or newer                      Row locks, partial indexes,
+                                                                                      percentile functions
+
+     Migrations                           Flyway                                      Versioned and repeatable
+                                                                                      scripts
+
+     Connection pool                      HikariCP                                    Spring Boot default; fast and
+                                                                                      observable
+
+     In-process cache                     Caffeine through Spring Cache               Simple, fast, atomic per-key
+                                                                                      loading
+
+     Rate limiting                        Bucket4j (in-memory token                   Two layers without extra
+                                          buckets) plus Nginx limit_req               infrastructure
+
+     Real-time                            Server-sent events with                     One-way push over plain HTTP
+                                          SseEmitter
+
+     Authentication                       Spring Security with JWT                    Stateless, role claims
+                                          (resource-server support)
+
+     API documentation                    springdoc-openapi                           Generated from the code
+
+     Edge                                 Nginx as reverse proxy, TLS                 Edge limits, SSE-safe proxying,
+                                          terminator and static host                  serves the UI
+
+     Client                               React with Vite and a fetch-based           Component model suits live
+                                          SSE client                                  boards
+
+     Testing                              JUnit 5, Mockito, Testcontainers,           Real database, architecture
+                                          ArchUnit, k6                                rules, load
+
+     Observability                        Logback JSON logs, Micrometer               Standard Spring tooling
+                                          with Prometheus format, optional
+                                          Grafana
+
+
+
+
+                                                                                                                     Page 5 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Layer                                Choice                                      Reason
+
+     Packaging and CI                     Docker Compose, GitHub Actions              One-command run, automatic
+                                                                                      checks
+
+
+
+  3.4 Closed decisions
+  UI (OI-02): React single-page app served by Nginx.
+
+       The SRS already specifies a token-based REST API, CORS and generated OpenAPI. One
+       API can then serve the web screens now and an Android kitchen display later.
+       The live boards need client-side state and event handling whatever framework is used;
+       server-rendered pages would duplicate that logic and mix session authentication with
+       the JWT API.
+       Fallback: if time is short, build the same screens in plain HTML and JavaScript (fetch
+       plus a streaming reader). The API, the stream contract and the rest of this architecture
+       do not change.
+
+  Database (OI-03): PostgreSQL.
+
+       Row-level locking (SELECT FOR UPDATE, SKIP LOCKED), partial indexes, RETURNING
+       and percentile_cont map directly onto FR-KDS-06, FR-ORD-12 and FR-RPT-03.
+       Strict constraints and transactional DDL support the integrity rules in SRS section 9.
+       MySQL 8 would work for most requirements, but percentile reporting and partial
+       indexes need workarounds.
+
+
+  3.5 Container view
+  Browser clients (cashier POS, station boards, manager board, status board and admin
+  screens) reach the system through Nginx, which terminates TLS, serves the built UI as
+  static files, applies coarse per-client rate limits and proxies /api to the application
+  container. The application holds all business logic and talks to PostgreSQL over JDBC. An
+  optional Prometheus and Grafana pair scrapes the application's metrics endpoint. Only
+  Nginx is published to the network; the application and the database are reachable only
+  inside the Compose network. Figure 1 shows the containers and their connections.
+
+
+
+
+                                                                                                              Page 6 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  container view · 5 containers, 4 connections
+
+  Figure 1. Container view. Requests flow from the browsers through Nginx to the
+  application and on to PostgreSQL; the optional observability pair pulls metrics from the
+  application.
+
+
+  4. Logical architecture
+
+  4.1 Modules
+
+     Module                 Responsibility                        Owns tables                 Events raised
+     (package)
+
+     auth                   Users, login, JWT,                    app_user, user_station,     None
+                            lockout, station                      refresh_token
+                            binding
+
+     menu                   Categories, items,                    category, menu_item,        MenuChanged
+                            modifiers, combos,                    item_station,
+                            availability, menu                    modifier_group, modifier,
+                            version                               combo
+
+     inventory              Stock levels,                         item_stock,                 StockDepleted
+                            reservations,                         stock_adjustment
+                            adjustments
+
+
+
+                                                                                                              Page 7 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Module                 Responsibility                        Owns tables            Events raised
+     (package)
+
+     order                  Order lifecycle,                      orders, order_line,    OrderStatusChanged
+                            pricing, tokens,                      order_line_modifier,
+                            idempotency,                          token_counter,
+                            cancellation                          idempotency_record
+
+     payment                Payment and refund                    payment, refund        None
+                            records, bill
+
+     kitchen                Tickets, station                      ticket, ticket_item    TicketCreated,
+                            queues, start,                                               TicketChanged,
+                            bump, recall,                                                TicketCancelled
+                            READY detection
+
+     board                  Public status board                   None (reads only)      None
+                            snapshot and
+                            stream
+
+     report                 SQL read models                       None (reads only)      None
+                            for the reports
+
+     audit                  Append-only event                     audit_event            None
+                            log and its search
+
+     config                 Admin-managed                         app_config             ConfigChanged
+                            settings
+
+     platform               Error envelope,                       None                   None
+                            correlation ID, rate
+                            limiting, cache
+                            setup, SSE hub,
+                            scheduling, security
+                            configuration
+
+
+
+  4.2 Dependency rules
+  A module exposes only its api package. No module touches another module's tables,
+  except report, which reads through SQL. Dependencies point one way (Figure 2):
+
+       payment depends on order.
+
+
+
+
+                                                                                                              Page 8 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+       kitchen depends on order's public port to read and change order status, and
+       implements order's TicketGateway interface. This inversion lets order create and
+       cancel tickets inside the payment transaction (FR-PAY-02) without order depending on
+       kitchen.
+       order depends on menu, inventory and audit.
+       inventory depends on menu, to mark an item unavailable at zero stock.
+       board depends on order and kitchen for read-only queries.
+       Every module may use audit, config and platform; report depends on the database
+       only.
+
+  Forbidden: dependency cycles, kitchen depending on payment, menu depending on
+  order, and any controller touching a repository. An ArchUnit test enforces these rules
+  (NFR-MNT-01).
+
+
+
+
+  module dependencies · 7 modules, 3 shared
+
+  Figure 2. Module dependencies. Order is the hub; kitchen reaches it through a port and
+  implements its TicketGateway interface.
+
+
+
+
+                                                                                          Page 9 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  4.3 Layers inside a module
+
+     Layer                       Contains                                                  Rules
+
+     api                         Controllers, request and response                         Validates input shape only; no
+                                 records, mappers                                          repositories and no business rules
+
+     application                 Use-case services, transaction                            The only layer that opens
+                                 boundary, orchestration, method-                          transactions
+                                 level authorization
+
+     domain                      Entities, value objects such as                           Business decisions live here; no
+                                 Money, state machines, pricing and                        web types
+                                 rules, domain events
+
+     infrastructure              Repositories, native SQL, adapters                        No business decisions
+                                 that implement ports
+
+
+
+  4.4 Domain events
+
+     Event                                                         Raised             Delivery         Consumers
+                                                                   by
+
+     OrderStatusChanged                                            order              After commit     Board hub, manager
+                                                                                                       hub
+
+     TicketCreated, TicketChanged,                                 kitchen            After commit     Station hubs, manager
+     TicketCancelled                                                                                   hub
+
+     MenuChanged                                                   menu               After commit     Menu cache eviction
+
+     StockDepleted                                                 inventory          In the           menu (mark item
+                                                                                      transaction      unavailable)
+
+     ConfigChanged                                                 config             After commit     Config cache eviction,
+                                                                                                       station hubs
+
+
+  Rules:
+
+       Audit is not event-driven. AuditService.record() is a direct call inside the business
+       transaction, so a failed audit write rolls the change back (FR-AUD-04).
+       After-commit listeners use Spring's transactional event support, run on a bounded
+       executor and never throw into the business flow.
+
+
+                                                                                                                          Page 10 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+       Delivery to screens is at-most-once. Correctness never depends on it, because clients
+       resynchronise (section 9).
+       An outbox table is the scale-out path if events ever need guaranteed delivery (section
+       5.6).
+
+
+  5. Request pipeline, caching, rate limiting and load handling
+
+  5.1 Request pipeline
+  Every request passes the same ordered stages (Figure 3). Cheap, context-free checks run
+  first, so that hostile or runaway traffic is rejected before it costs a database connection:
+  size and connection limits and the per-IP limit at the edge, then correlation,
+  authentication, per-user rate limiting, authorization and validation in the application. Rate
+  limiting runs after authentication so that its key is the user, not just an address; login,
+  which has no user yet, is limited by address and username. Business code, and the only
+  database work, begins at stage 8.
+
+
+
+
+                                                                                         Page 11 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  request pipeline · 9 stages, 2 rate-limit layers
+
+  Figure 3. The request pipeline. The accent stages are the two rate-limit layers; dashed
+  arrows show what the client receives when a stage rejects the request.
+
+
+  5.2 Rate limiting
+  Goals: stop brute-force login, contain retry storms and buggy clients, keep staff screens
+  responsive, bound SSE resources, and never block legitimate peak traffic (under 1 request
+  per second, section 2.3).
+
+  Two layers
+
+
+
+
+                                                                                       Page 12 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+       Edge (Nginx limit_req and limit_conn): coarse, per client address, protects the
+       application process. Behind Docker the client address must come from the trusted
+       proxy header only (set_real_ip_from); otherwise a client could spoof its way around
+       the limit.
+       Application (Bucket4j token buckets): fine-grained, per user and endpoint class, with
+       burst capacity and steady refill. Buckets live in a Caffeine cache that expires idle
+       entries after 10 minutes and caps the entry count at 10,000, so a flood of distinct keys
+       cannot exhaust memory.
+
+
+     Class                           Key                                Burst         Refill          Applies to
+
+     LOGIN                           Address and                        5             5 per 10        POST /auth/login
+                                     username                                         minutes
+
+     REFRESH                         User                               10            10 per 10       POST /auth/refresh
+                                                                                      minutes
+
+     ORDER_WRITE                     User                               30            30 per          Create, edit, cancel, pay,
+                                                                                      minute          complete
+
+     TICKET_ACTION                   User                               120           120 per         Start, bump, recall
+                                                                                      minute
+
+     READ                            User                               300           300 per         Menu, orders, tickets
+                                                                                      minute
+
+     REPORT                          User                               10            10 per minute   Reports and audit search
+
+     ADMIN_WRITE                     User                               60            60 per          Admin changes
+                                                                                      minute
+
+     BOARD_READ                      Address                            60            60 per          Board snapshot
+                                                                                      minute
+
+     SSE_CONNECT                     User or address                    10            10 per minute   Opening a stream
+
+
+  Additional limits: at most 3 open streams per user, 20 per address and 50 in total. At the
+  edge: 20 requests per second per address with a burst of 40 for /api, and 10 per minute
+  with a burst of 5 for the login path. All values are defaults held in configuration.
+
+  Sanity check against the workload. A cashier creates about 2.5 orders per minute at the
+  150-per-hour peak, so ORDER_WRITE at 30 per minute is 12 times that. Legitimate traffic
+  never touches a limit; a stuck client in a retry loop hits it within seconds.
+
+
+
+                                                                                                                              Page 13 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  Login protection. The LOGIN bucket throttles attempts, and the lockout in FR-AUTH-06
+  (5 failures in 10 minutes, locked for 15) is stored on the user row so it survives restarts.
+  Both return the same generic message as a wrong password where applicable.
+
+  Response contract. HTTP 429 with error code RATE_LIMITED, a Retry-After header in
+  seconds and X-RateLimit-Remaining. Clients back off with jitter and never retry a write
+  without its Idempotency-Key.
+
+  Exemptions and safety. The health endpoint, static files and SSE heartbeats are not
+  limited. A loadtest profile raises the limits for k6 runs; the application refuses to start with
+  that profile when the production profile is active.
+
+  Failure behaviour. The limiter has no external dependency. If it throws an unexpected
+  error, requests fail open with an error log and a metric, except LOGIN, which fails closed.
+
+  Observability and tests. A counter kf_rate_limit_rejected_total by class, and an alert
+  when more than 5 percent of requests are rejected. Tests: the sixth login attempt returns
+  429 even with the right password; buckets refill; one user's limit does not affect another's;
+  the load test at design workload shows zero 429 responses.
+
+
+  5.3 Caching
+  Rule: cache for display and reference data; the database decides. Never cached: orders,
+  tickets, payments, the stock figures used for decisions, and the audit log. Order validation
+  and pricing always read current prices and availability from the database inside the
+  transaction (BR-02, BR-04), so a stale cache can make a screen briefly out of date but can
+  never sell an unavailable item or a wrong price. Configuration is the one cached decision
+  input: it is evicted on change and expires after 60 seconds as a backstop.
+
+
+     Cache                 Content                                        Expiry        Size    Invalidation
+
+     menuView              POS menu: categories,                          5 minutes     1       Evicted after commit on
+                           items, modifier groups,                        after write   entry   MenuChanged
+                           availability
+
+     stationList           Stations for screens and                       10 minutes    Small   Evicted on
+                           filters                                        after write           ConfigChanged
+
+     appConfig             Thresholds, recall                             60 seconds    Small   Evicted after commit on
+                           window, business-day                           after write           ConfigChanged
+                           cutoff, timeouts
+
+
+
+
+                                                                                                                   Page 14 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  HTTP caching. GET /menu returns an ETag derived from a menu version counter that
+  increments on every MenuChanged, with Cache-Control: no-cache, so screens revalidate
+  cheaply and receive 304 when nothing changed. Built UI files have content-hashed names
+  and Cache-Control: public, max-age=31536000, immutable; index.html is no-cache.
+
+  Stampede and race handling. Caffeine's loading cache loads a key once even when many
+  requests miss together. An eviction issued after commit runs after any in-flight load of
+  that key finishes, because Caffeine computes each key atomically; a loader that read data
+  from before the commit therefore cannot leave a stale entry behind. A race test in
+  document 7 proves this, and the 5-minute expiry is the backstop.
+
+  Staleness budget. The server reflects an availability change in the menu response as
+  soon as the transaction commits (FR-INV-03). POS screens revalidate with the ETag
+  whenever a new order is started and every 15 seconds.
+
+  Measurement and sizing. Hit ratio, load time and size are exported through Micrometer;
+  the target hit ratio for menuView is above 95 percent. A menu of 100 items is well under 1
+  MB, so the three caches together use a few megabytes.
+
+
+  5.4 Load handling and backpressure
+  Principle: bound everything, reject early and cheaply, and protect the order and ticket
+  path first.
+
+
+     Control                                                           Default                Protects against
+
+     Tomcat max threads and accept                                     100 and 100            Thread explosion and an
+     count                                                                                    unbounded connection
+                                                                                              queue
+
+     Nginx request timeout                                             15 s for /api; SSE     Hanging requests
+                                                                       exempt
+
+     Request body size                                                 1 MB                   Oversized payloads
+
+     Page size                                                         Maximum 100            Huge result sets
+
+     HikariCP pool                                                     Maximum 20, minimum    Database overload; waits
+                                                                       idle 5, connection     beyond 2 s return 503
+                                                                       timeout 2 s, maximum   SERVICE_BUSY
+                                                                       lifetime 30 min
+
+
+
+
+                                                                                                                   Page 15 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Control                                                           Default                   Protects against
+
+     PostgreSQL statement_timeout                                      5 s for the application   Runaway queries
+                                                                       role; 10 s for report
+                                                                       queries
+
+     PostgreSQL lock_timeout                                           2s                        Waiting forever on a row
+                                                                                                 lock
+
+     idle_in_transaction_session_timeout                               30 s                      Leaked transactions that
+                                                                                                 hold locks
+
+     Report bulkhead                                                   2 concurrent report       Reports starving the
+                                                                       queries; others wait up   order path
+                                                                       to 100 ms, then get 429
+
+     SSE sending                                                       Bounded executor;         A slow client holding
+                                                                       per-subscriber queue      memory
+                                                                       of 100; overflow closes
+                                                                       the stream
+
+
+  Load-shedding order. Reports are shed first, then reads. Order creation, payment and
+  ticket actions have their own limits and are never queued behind reports.
+
+  Capacity reasoning. An order-creation transaction should use about 60 ms of database
+  time, so a 20-connection pool supports roughly 330 of them per second. Token allocation
+  serialises on one counter row held for about 10 ms, so creation tops out near 100 orders
+  per second. The design peak is 0.04 per second, more than 2,000 times below that ceiling.
+  The load test's 50 concurrent users run at the ceiling, over 1,000 times the real peak,
+  which is what exposes locking mistakes.
+
+  Latency budget for order creation (NFR-PERF-01: 300 ms at p95).
+
+
+     Step                                                                             Budget
+
+     Edge, filters, authentication, rate limit                                        15 ms
+
+     Validation and one batched load of items and                                     20 ms
+     modifiers
+
+     Pricing and GST                                                                  5 ms
+
+     Idempotency insert and stock reservation                                         30 ms
+
+
+
+
+                                                                                                                         Page 16 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Step                                                                             Budget
+
+     Token allocation, order and line inserts (batched)                               40 ms
+
+     Audit insert                                                                     10 ms
+
+     Commit                                                                           20 ms
+
+     Response mapping and headers                                                     10 ms
+
+     Total                                                                            150 ms, half of the 300 ms target
+
+
+
+  5.5 Query efficiency
+       No N+1 queries: fetch joins for an order with its lines, DTO projections for lists, and a
+       test that counts statements per endpoint.
+       Hibernate batching (batch size 50, ordered inserts) for order lines and ticket items.
+       Offset pagination up to 100 rows per page; keyset pagination for deep order history.
+       Reports aggregate in SQL over indexed ranges (section 8.5), inside read-only
+       transactions with the report statement timeout.
+
+
+  5.6 Scale-out path (not built in version 1)
+
+     Need                                                          Change
+
+     More than one application instance                            Shared cache (Redis) or short expiries; Bucket4j on
+                                                                   a shared store; SSE fan-out through PostgreSQL
+                                                                   LISTEN and NOTIFY or Redis pub/sub
+
+     Heavy reporting                                               Read replica and a materialised daily summary
+
+     Guaranteed event delivery                                     Transactional outbox table with a relay
+
+     Several outlets                                               An outlet id on every table and stream; per-outlet
+                                                                   token counters
+
+     Higher write rates                                            Connection pooler (PgBouncer); shard the token
+                                                                   counter
+
+
+  None of these is needed for the design workload; the list shows where the architecture
+  would bend, which is the useful answer to a scaling question in an interview.
+
+
+
+
+                                                                                                                          Page 17 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  6. Concurrency and transaction design
+
+  6.1 Principles
+       PostgreSQL's default READ COMMITTED isolation, plus explicit locks where an
+       invariant spans rows. SERIALIZABLE is rejected: it needs retry handling on every write
+       path, costs throughput and is harder to explain.
+       Optimistic locking (a version column) for a single row edited by people, such as a
+       ticket; compare-and-set updates for state and counters; pessimistic row locks
+       (SELECT FOR UPDATE) for invariants that span rows, such as an order and its tickets;
+       unique constraints as the last line of defence.
+       Short transactions: no network calls and no SSE sends inside one; events leave only
+       after commit.
+       One global lock order: the order row, then its tickets by id, then stock rows by item id.
+       A fixed order prevents deadlocks.
+
+
+  6.2 Invariants and their mechanisms
+
+     Invariant                       Mechanism                              On violation                 Verified
+                                                                                                         by
+
+     One order per                   The idempotency                        422 IDEMPOTENCY_KEY_REUSED   NFR-
+     idempotency                     row is inserted first,                                              CONC-01,
+     key                             inside the order's                                                  AT-03
+                                     own transaction,
+                                     with a unique key
+                                     per user. A
+                                     concurrent duplicate
+                                     blocks on the unique
+                                     index until the first
+                                     transaction commits,
+                                     then reads the
+                                     stored response and
+                                     replays it. If the first
+                                     rolls back, the
+                                     duplicate proceeds.
+                                     A payload hash
+                                     mismatch is
+                                     rejected.
+
+
+
+
+                                                                                                              Page 18 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Invariant                       Mechanism                              On violation               Verified
+                                                                                                       by
+
+     Unique token                    A counter row per                      None expected              FR-ORD-
+     per business                    business day is                                                   04
+     day                             incremented with
+                                     UPDATE ...
+                                     RETURNING,
+                                     allocated as late as
+                                     possible to shorten
+                                     the lock; unique
+                                     (business_day,
+                                     token) as backstop
+
+     No overselling                  Conditional UPDATE:                    409 OUT_OF_STOCK           NFR-
+                                     stock = stock - n                                                 CONC-
+                                     where stock >= n, in                                              02, AT-04
+                                     ascending item
+                                     order; zero rows
+                                     updated rolls back
+                                     the whole
+                                     transaction, so there
+                                     is no partial
+                                     reservation
+
+     Exactly one                     Compare-and-set                        409                        FR-PAY-
+     payment                         UPDATE orders SET                      PAYMENT_ALREADY_RECORDED   03
+                                     status = PAID
+                                     WHERE id = :id AND
+                                     status = CREATED,
+                                     which must update
+                                     one row; unique
+                                     (order_id) on
+                                     payment
+
+     One writer per                  JPA @Version on                        409 STALE_VERSION          NFR-
+     ticket                          ticket; the client                                                CONC-03,
+                                     sends the version it                                              AT-05
+                                     saw
+
+
+
+
+                                                                                                            Page 19 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Invariant                       Mechanism                              On violation             Verified
+                                                                                                     by
+
+     READY exactly                   Every bump, recall                     None expected            NFR-
+     once                            and cancel locks the                                            CONC-
+                                     order row first                                                 04, AT-06
+                                     (section 6.3)
+
+     Cancel versus                   The same order lock;                   409 INVALID_TRANSITION   AT-07
+     progress                        the state guard is
+                                     checked after the
+                                     lock, so the loser
+                                     sees the new state
+
+     Audit with the                  Same transaction; a                    500 and rollback         AT-11, FR-
+     change                          failed audit write                                              AUD-04
+                                     rolls back the
+                                     change
+
+     Unpaid timeout                  The job selects                        Job skips the order      FR-ORD-
+     versus payment                  candidates with FOR                                             12
+                                     UPDATE SKIP
+                                     LOCKED, then
+                                     applies the same
+                                     compare-and-set
+
+
+
+  6.3 Why READY needs an order-level lock
+  Two cooks bump the last two tickets of an order at the same moment. Without a lock,
+  each transaction updates its own ticket row and then checks whether any ticket is still
+  open. Under READ COMMITTED each sees the other's ticket as still in progress, because
+  the other transaction has not committed. Neither sets the order READY, and it sits in
+  IN_KITCHEN forever.
+
+  The fix is to lock the order row (SELECT ... FOR UPDATE) at the start of every bump, recall
+  and cancel. The second transaction waits until the first commits, then sees the first ticket
+  DONE, counts zero open tickets and sets READY exactly once. Locking the order before
+  the ticket gives a single lock order and so no deadlock. Describing the bug first and the fix
+  second is the strongest way to tell this in an interview.
+
+
+
+
+                                                                                                             Page 20 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  6.4 Transaction boundaries
+
+     Operation                     Transaction scope                                  Locks, in order              Retry
+
+     Create order                  Idempotency row,                                   Idempotency row, stock       Deadlock
+                                   validation, pricing, stock                         rows by item id, token       retry, at most
+                                   reservation, token, order                          counter row                  2
+                                   and lines, audit
+
+     Edit order                    Recalculate, adjust stock,                         Order row, stock rows by     Deadlock
+     (CREATED)                     audit                                              item id                      retry, at most
+                                                                                                                   2
+
+     Record                        Order compare-and-set,                             Order row                    None
+     payment                       payment, tickets, order to
+                                   IN_KITCHEN, audit
+
+     Start ticket                  Version check, state                               Ticket row (version)         None
+                                   change, audit
+
+     Bump or recall                Order lock, ticket change,                         Order row, then ticket row   None
+                                   READY evaluation, audit
+
+     Cancel order                  Order lock, tickets, stock                         Order row, ticket rows by    Deadlock
+                                   restore (CREATED only),                            id, stock rows by id         retry, at most
+                                   refund entry, audit                                                             2
+
+     Report                        Read-only transaction                              None                         None
+                                   with statement timeout
+
+
+
+  6.5 Deadlocks, timeouts and retries
+       lock_timeout of 2 seconds: a statement that waits longer fails with SQLSTATE 55P03
+       and returns 503 SERVICE_BUSY with Retry-After (a proposed SRS error code, section
+       15.2).
+       Deadlock (40P01): the whole transaction is retried at most twice with a 20 to 60 ms
+       jittered delay, only for operations that are safe to repeat.
+       Optimistic conflicts are never retried automatically: the user decides, with the current
+       state in the 409 response.
+       Retries are counted in kf_db_lock_retry_total.
+
+
+
+
+                                                                                                                             Page 21 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  6.6 Proving it
+  Concurrency tests (NFR-CONC-01 to 04, AT-03 to AT-06) run against real PostgreSQL
+  through Testcontainers. N threads are released together by a CountDownLatch and the
+  assertions read the database: one order, stock exactly zero, one READY audit record.
+  Each test repeats 50 times to expose flakiness. To prove the tests can fail, a mutation
+  check removes each lock or constraint in turn and confirms that the matching test goes
+  red.
+
+
+  7. Key runtime flows
+
+  7.1 Create an order
+
+     Step        Component                              Action
+
+     1           Browser                                POST /orders with an Idempotency-Key
+
+     2           Nginx and filters                      Edge limits, correlation ID, JWT, ORDER_WRITE
+                                                        bucket, role check
+
+     3           Controller                             Bean Validation of the request shape
+
+     4           OrderService                           Begin the transaction
+
+     5           IdempotencyService                     Insert the key row; a concurrent duplicate blocks
+                                                        here and later replays
+
+     6           MenuQuery                              Load items, modifiers and availability from the
+                                                        database in one batched query, never from the
+                                                        cache
+
+     7           OrderService                           Validate availability, quantity, modifier minimum
+                                                        and maximum; collect all errors
+
+     8           PricingService                         Price lines and GST with BigDecimal
+
+     9           StockService                           Reserve stock with conditional updates in item-id
+                                                        order
+
+     10          TokenService                           Allocate the token just before the insert
+
+     11          OrderRepository                        Insert order, lines and modifiers as a batch
+
+     12          AuditService                           Record ORDER_CREATED
+
+
+
+
+                                                                                                            Page 22 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Step        Component                              Action
+
+     13          IdempotencyService                     Store the response with the key, then commit
+
+     14          Controller                             201 with totals; metrics recorded
+
+
+
+  7.2 Record payment and send to the kitchen
+
+     Step        Component                                             Action
+
+     1           Filters                                               As above, with the ORDER_WRITE bucket
+
+     2           PaymentService                                        Begin the transaction
+
+     3           OrderWorkflow                                         Compare-and-set CREATED to PAID; zero rows
+                                                                       means 409
+
+     4           PaymentRepository                                     Insert the payment; the amount must equal the
+                                                                       order total
+
+     5           TicketGateway (kitchen)                               Group lines by station using the item-to-station
+                                                                       mapping from the database; insert tickets and
+                                                                       ticket items
+
+     6           OrderWorkflow                                         Compare-and-set PAID to IN_KITCHEN
+
+     7           AuditService                                          Record payment, tickets and status change
+
+     8           Transaction                                           Commit
+
+     9           Event listeners (after commit)                        TicketCreated to each station hub;
+                                                                       OrderStatusChanged to the board and manager
+                                                                       hubs
+
+     10          Controller                                            201 with the bill
+
+
+
+  7.3 Bump a ticket to READY
+
+     Step        Component                                             Action
+
+     1           Filters                                               TICKET_ACTION bucket; station binding check
+
+     2           TicketService                                         Begin the transaction; read the ticket's order id
+
+
+
+
+                                                                                                                           Page 23 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Step        Component                                             Action
+
+     3           Order lock                                            SELECT ... FOR UPDATE on the order row
+
+     4           TicketService                                         Re-read the ticket; compare its version with the
+                                                                       client's; mismatch returns 409 STALE_VERSION
+
+     5           State machine                                         IN_PROGRESS to DONE
+
+     6           TicketService                                         Count open tickets; if zero and the order is
+                                                                       IN_KITCHEN, compare-and-set to READY
+
+     7           AuditService                                          Record the changes, then commit
+
+     8           Event listeners (after commit)                        TicketChanged to station and manager hubs;
+                                                                       OrderStatusChanged to the board when READY
+
+
+
+  7.4 A station screen connects and reconnects
+   1. The client opens the authenticated stream and starts buffering events.
+   2. The server checks role and station binding, registers a subscriber and sends a hello
+      event carrying server time.
+   3. The client fetches the snapshot of the station's open tickets.
+   4. The client merges the snapshot, then buffered and live events, keeping the highest
+      version of each ticket.
+   5. The server sends a heartbeat every 15 seconds.
+   6. On disconnect the client reconnects with exponential backoff (1, 2, 4, 8 seconds, then
+      15 at most, with jitter) and repeats steps 1 to 4.
+   7. Safety nets: a full snapshot refresh every 60 seconds, and a 2-second snapshot poll
+      while the stream is down.
+
+
+  8. Data architecture
+
+  8.1 Overview
+  One PostgreSQL database with three roles: kf_migrator (schema changes, used only by
+  Flyway at start-up), kf_app (data changes only; the application's runtime role) and an
+  optional read-only role for report experiments. On audit_event, kf_app has INSERT and
+  SELECT only, and a trigger rejects UPDATE and DELETE as defence in depth (FR-AUD-02).
+
+
+
+
+                                                                                                                      Page 24 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  8.2 Logical model
+  Figure 4 shows the main tables. Money is NUMERIC(12,2) and timestamps are
+  TIMESTAMPTZ stored in UTC. Order lines carry snapshots of name, price and GST rate.
+  Each ticket belongs to one order and one station. Categories, modifiers, combos, users,
+  the token counter and the idempotency record follow the SRS section 9 entities and are
+  specified in document 4.
+
+
+
+
+  logical data model · 8 tables and the audit log
+
+  Figure 4. Logical data model. Orders are the hub; the audit log references any entity by
+  type and id.
+
+
+
+
+                                                                                       Page 25 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  8.3 Constraints and indexes (confirmed with EXPLAIN in document 4)
+
+     Structure                                       Definition                                  Serves
+
+     Unique constraints                              order_number; (business_day,                BR-01, FR-PAY-03, BR-
+                                                     token); payment (order_id);                 15
+                                                     idempotency (user, key)
+
+     Check constraints                               quantity 1 to 50; price above 0; stock      DR-03
+                                                     0 or more; status values
+
+     Foreign keys                                    On every relationship                       DR-03
+
+     Index on orders                                 (status, created_at DESC)                   Open orders and
+                                                                                                 search
+
+     Index on orders                                 (business_day, status)                      Reports and tokens
+
+     Partial index on ticket                         (station_id, created_at) WHERE              Station queue; small
+                                                     status is NEW or IN_PROGRESS                and fast
+
+     Index on ticket                                 (order_id)                                  READY check
+
+     Indexes on order_line                           (order_id) and (item_id)                    Order loading; top-
+                                                                                                 items report
+
+     Indexes on audit_event                          (entity_type, entity_id, created_at         Audit search
+                                                     DESC) and (created_at)
+
+     Index on                                        (created_at)                                24-hour purge
+     idempotency_record
+
+
+
+  8.4 Access patterns
+
+     Use case                       Query shape                                         Target
+
+     Station queue                  Open tickets of one station, rush first,            Milliseconds; fewer than 50
+                                    then oldest                                         rows
+
+     READY check                    Count open tickets of one order                     A handful of rows
+
+     POS menu                       Whole menu, once per cache window                   Served from cache
+
+     Order search                   Filter by status, date, token; page of 20           p95 under 300 ms at 100,000
+                                    to 100                                              orders
+
+
+
+                                                                                                                   Page 26 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+       Use case                     Query shape                                       Target
+
+       Sales report                 Aggregate paid orders by business day,            p95 under 2 s
+                                    payment method
+
+       Preparation                  percentile_cont of done minus started,            p95 under 2 s
+       times                        by station and item
+
+       Audit search                 Filter by entity, actor or date                   p95 under 300 ms at 500,000
+                                                                                      rows
+
+
+
+  8.5 Reporting
+  Reports aggregate in SQL over indexed ranges of at most 92 days. The business_day
+  column is stored on orders so that date predicates stay indexable, and preparation-time
+  statistics use percentile_cont. Reports run in read-only transactions with the report
+  statement timeout and the report bulkhead (section 5.4). If reports ever slow down, a
+  daily summary table refreshed by a scheduled job is the next step; it is not part of version
+  1.
+
+
+  8.6 Migrations and seed data
+  Flyway applies versioned scripts. While the schema is still changing, keep a single baseline
+  migration (V1) and replace it wholesale; after the first demo build, switch to forward-only
+  incremental migrations (V2, V3 and so on). Seed data and the 100,000-order generator
+  (SQL using generate_series) are separate profile-gated commands and never part of
+  migrations.
+
+
+  8.7 Backup and retention
+  A nightly pg_dump in a Compose profile keeps 7 daily copies, and a restore is tested once
+  before the demo. Targets for the demo: recovery point 24 hours, recovery time 15 minutes.
+  Orders and audit records are kept for at least 12 months (DR-09). The only deletions in
+  version 1 are idempotency records after 24 hours and refresh tokens after expiry.
+
+
+
+
+                                                                                                            Page 27 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  9. Real-time architecture (SSE)
+
+  9.1 Why server-sent events
+  Screens need one-way push from server to browser; their actions go back as ordinary
+  REST calls. SSE runs over plain HTTP, passes proxies, reconnects automatically and needs
+  no extra protocol. WebSocket would add a second protocol, a different authentication
+  story and manual reconnection for no benefit here (ADR-03).
+
+
+  9.2 Streams
+
+   Stream                             Audience                Authentication Events                   Snapshot endpoint
+
+   /api/v1/stream/stations/{id} Kitchen (bound to             JWT                 TICKET_CREATED,     GET
+                                the station),                                     TICKET_CHANGED,     /api/v1/stations/{id}/tickets
+                                Manager                                           TICKET_CANCELLED,
+                                                                                  CONFIG_CHANGED
+
+   /api/v1/stream/manager             Manager                 JWT                 ORDER_CHANGED,      GET /api/v1/orders with the
+                                                                                  TICKET_CHANGED,     open filter
+                                                                                  LATE_TICKET
+
+   /api/v1/stream/board               Public                  None                BOARD_CHANGED       GET /api/v1/board
+
+
+
+
+  9.3 Event design
+  Each event carries the full current state of the object, not a difference, together with its
+  version: for example a ticket with its id, status and version. The client keeps the highest
+  version it has seen for each id, so processing is idempotent, independent of order and
+  tolerant of gaps and duplicates. Events also carry a name and a per-process sequence id
+  for debugging, but correctness never depends on replay.
+
+
+  9.3a Hub design
+       The SseHub keeps a concurrent map from stream key to subscribers. Each subscriber
+       wraps an SseEmitter and a bounded queue of 100 events.
+       After-commit listeners call publish(); a small bounded executor drains each queue and
+       sends.
+       A heartbeat comment every 15 seconds stops proxies closing idle streams and lets the
+       server detect dead clients.
+
+
+
+
+                                                                                                                              Page 28 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+       A subscriber is removed on completion, timeout or error. A subscriber whose queue
+       overflows or whose send fails is closed, never skipped: the client reconnects and
+       resynchronises, so an event is never silently lost.
+       Connection caps and the SSE_CONNECT bucket apply (section 5.2). A gauge
+       kf_sse_connections reports open streams by stream type.
+
+
+  9.4 Consistency model
+  The database is the truth and the push is a hint. Delivery happens after commit and is at-
+  most-once. A screen stays correct because it resynchronises on connect, on reconnect,
+  when told SNAPSHOT_REQUIRED (sent on graceful shutdown) and on a 60-second safety
+  refresh. With a healthy stream, staleness equals the push latency (target under 1 second);
+  with a failed stream the client polls the snapshot every 2 seconds.
+
+
+  9.5 Authenticated streams in browsers
+  The browser's EventSource cannot send an Authorization header, and putting a token in
+  the URL would leak it into logs. Authenticated streams therefore use a fetch-based SSE
+  client that sends the header; the public board uses plain EventSource. The server
+  validates the token at connect and closes the stream when that token would expire (15
+  minutes); the client refreshes the token and reconnects. A deactivated user's streams
+  therefore end within 15 minutes, matching FR-AUTH-05.
+
+
+  9.6 Proxy settings
+  For /api/v1/stream/ Nginx uses HTTP/1.1, proxy_buffering off, proxy_cache off and
+  proxy_read_timeout 3600s, and the application sends X-Accel-Buffering: no. Without
+  these, events arrive in delayed batches, which is the most common SSE deployment bug.
+
+
+  9.7 Multi-instance path
+  Fan out through PostgreSQL LISTEN and NOTIFY (no new infrastructure) or Redis
+  pub/sub; each instance feeds its own subscribers.
+
+
+
+
+                                                                                       Page 29 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  10. Security architecture
+
+  10.1 Trust boundaries
+  Clients are untrusted. Nginx is the edge. The application trusts only what it has validated.
+  The database accepts connections only from the application, over the Compose network,
+  with least-privilege roles.
+
+
+  10.2 Authentication
+       Login issues a 15-minute access token (JWT) holding subject, role, bound stations and
+       a token id. The signing key comes from the environment, is at least 256 bits and is
+       never committed.
+       Refresh tokens (Should): random, stored hashed, rotated on every use and delivered in
+       an HttpOnly, Secure, SameSite=Strict cookie limited to the auth path. Reuse of a
+       consumed token revokes the whole chain (FR-AUTH-07).
+       Passwords use BCrypt with a cost chosen so hashing takes about 250 ms on the target
+       machine. Wrong-user and wrong-password cases take similar time and return one
+       message.
+       Lockout counters live on the user row; the LOGIN bucket adds throttling (section 5.2).
+
+
+  10.3 Authorization
+  Four layers, deny by default: (1) URL rules by role; (2) method security on application
+  services; (3) station binding in the ticket service; (4) the state machine, which checks the
+  actor's role for each transition. AT-08 tests every role against every endpoint.
+
+
+  10.4 Threats and controls
+
+     Threat                             Example                             Control                  Requirement
+
+     Credential                         Brute-force login                   BCrypt, lockout, LOGIN   FR-AUTH-06
+     guessing                                                               bucket, edge limit
+
+     Privilege                          A cook calls a                      Layered authorization,   FR-AUTH-03, AT-
+     escalation                         manager endpoint                    deny by default          08
+
+     Price tampering                    Client sends a                      Server prices from the   BR-02
+                                        lower price                         database; snapshots on
+                                                                            lines
+
+
+
+
+                                                                                                                   Page 30 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Threat                             Example                             Control                        Requirement
+
+     Replay and                         A retry creates a                   Idempotency key                FR-ORD-10
+     duplicates                         second order
+
+     Injection                          Malicious text in a                 Bean Validation, bound         NFR-SEC-02
+                                        note                                parameters, no SQL built
+                                                                            from text
+
+     Audit tampering                    Editing history                     Insert-only grants and a       FR-AUD-02
+                                                                            trigger
+
+     Denial of service                  Request flood,                      Edge and application limits,   Section 5
+                                        many streams                        stream caps, timeouts,
+                                                                            report bulkhead
+
+     Information                        Stack trace in an                   Error envelope without         FR-SYS-01, FR-
+     leakage                            error                               internals; the board shows     BRD-01
+                                                                            tokens only
+
+     Token theft                        Script reads the                    Token kept in memory only,     NFR-SEC-01,
+                                        token                               strict CSP, short expiry       NFR-SEC-03
+
+     Secrets exposure                   Key committed to                    Environment variables, only    NFR-SEC-01
+                                        the repository                      .env.example committed,
+                                                                            secret scanning in CI
+
+     Vulnerable                         A known flaw in a                   Pinned versions, automated     NFR-SEC-05
+     dependencies                       library                             update pull requests,
+                                                                            dependency scan in CI
+                                                                            (Should)
+
+
+
+  10.5 Browser and transport
+  CORS is limited to configured origins. Headers: Content-Security-Policy with default-src
+  'self', X-Content-Type-Options nosniff, Referrer-Policy no-referrer and frame-ancestors
+  none. HTTPS is required outside local development. The database port is never published.
+
+
+
+
+                                                                                                                         Page 31 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  11. Reliability and failure handling
+
+  11.1 Failure modes
+
+     Failure                      Detection                                     Behaviour                Recovery
+
+     Database                     Readiness fails;                              API returns 503;         Pool reconnects
+     down                         connection timeout                            screens show an          automatically
+                                                                                offline banner and
+                                                                                keep polling
+
+     Pool                         Pending-connection                            503 SERVICE_BUSY         Load drops;
+     exhausted                    metric; 2-second                              with Retry-After         investigate with
+                                  timeout                                                                metrics
+
+     Slow query                   statement_timeout                             Request fails and is     Fix the index or
+                                                                                logged with its          query
+                                                                                correlation ID
+
+     Lock wait or                 SQLSTATE 55P03 or                             Bounded retry, then      Review contention
+     deadlock                     40P01                                         503                      counter
+
+     Slow or dead                 Failed send or full queue                     Stream closed            Client reconnects
+     SSE client                                                                                          and resynchronises
+
+     Application                  Container health check                        Docker restarts it; no   Screens reconnect
+     crash                                                                      data is lost because
+                                                                                commits are in
+                                                                                PostgreSQL
+
+     Duplicate                    Idempotency key                               Stored response          None needed
+     request or                                                                 replayed
+     retry
+
+     Device clocks                Timers use server                             Ages stay consistent     None needed
+     differ                       timestamps
+
+     Scheduler                    SKIP LOCKED                                   Each order handled       None needed
+     overlap                                                                    once
+
+
+
+
+                                                                                                                            Page 32 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  11.2 Graceful shutdown
+  The server shuts down gracefully with a 20-second grace period. On SIGTERM readiness
+  goes down, new requests stop, in-flight transactions finish, and every stream receives
+  SNAPSHOT_REQUIRED before it is closed.
+
+
+  11.3 Health checks and scheduled jobs
+  Liveness reports that the process is up; readiness reports that the database is reachable
+  and migrations are applied. Compose health checks gate start-up order. Scheduled jobs:
+  the unpaid-order timeout (every minute), idempotency purge and refresh-token purge
+  (hourly). Each is safe with one or many instances because it claims rows with SKIP
+  LOCKED.
+
+
+  11.4 Degraded modes
+
+     If this fails                                                 The system
+
+     SSE streams                                                   Screens poll the snapshot every 2 seconds
+
+     A cache                                                       Loads from the database
+
+     The rate limiter (unexpected error)                           Fails open, with an error log and metric; login fails
+                                                                   closed
+
+     The metrics stack                                             Keeps taking orders; only dashboards are lost
+
+
+
+
+  12. Observability
+
+  12.1 Logs
+  Structured JSON to stdout, one line per event, with timestamp, level, correlationId, userId,
+  orderNumber, stationId and message. The correlation ID is accepted from X-Correlation-Id
+  or generated, returned in a response header and included in every error envelope.
+  Passwords, tokens and Authorization headers are never logged. INFO records business
+  events, WARN records rejected and retried operations, ERROR records unexpected
+  failures.
+
+
+
+
+                                                                                                                           Page 33 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  12.2 Metrics
+
+     Metric                                                                   Type       Purpose
+
+     http_server_requests by route and status                                 Timer      Latency and error rate
+
+     kf_order_create_seconds                                                  Timer      NFR-PERF-01
+
+     kf_orders_created_total                                                  Counter    Throughput
+
+     kf_ticket_cycle_seconds by station                                       Timer      Kitchen performance
+
+     kf_sse_connections by stream                                             Gauge      Open streams
+
+     kf_sse_stream_closed_total by reason                                     Counter    Overflow, timeout, error
+
+     kf_rate_limit_rejected_total by class                                    Counter    Limiter behaviour
+
+     Cache hits, misses and load time by cache                                Standard   Cache effectiveness
+
+     hikaricp active and pending connections                                  Gauge      Pool pressure
+
+     kf_db_lock_retry_total                                                   Counter    Contention
+
+     kf_idempotent_replay_total                                               Counter    Retry frequency
+
+     kf_report_bulkhead_rejected_total                                        Counter    Report shedding
+
+
+
+  12.3 Alerts
+  Examples, written as thresholds on Grafana panels in version 1: order creation p95 above
+  300 ms for 5 minutes; pending database connections above 0 for 1 minute; 5xx rate above
+  1 percent; rate-limit rejections above 5 percent; no open stream for a station during
+  opening hours. Automated alert delivery is optional.
+
+
+  12.4 Logs versus audit
+  Logs are for operators and may be rotated. The audit log is business data: kept for 12
+  months, stored in the database and written in the same transaction as the change.
+
+
+
+
+                                                                                                                    Page 34 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  13. Deployment and delivery
+
+  13.1 Topology
+
+     Service                            Image                             Exposed             Health       Notes
+                                                                                              check
+
+     nginx                              Nginx with the                    Ports 80 and 443    HTTP 200     Edge limits,
+                                        built UI                          to the LAN          on /         TLS, proxy
+
+     app                                Application                       Internal 8080;      Readiness    Runs as a
+                                        image (Java 21,                   management          endpoint     non-root user
+                                        multi-stage                       port internal
+                                        build)
+
+     postgres                           PostgreSQL 16                     Internal 5432       pg_isready   Named
+                                                                          only                             volume for
+                                                                                                           data
+
+     prometheus,                        Official images                   Internal; Grafana   HTTP         Scrapes
+     grafana                                                              optional on a                    application
+     (observability                                                       local port                       metrics
+     profile)
+
+     backup (backup                     PostgreSQL                        None                Exit code    Nightly
+     profile)                           client image                                                       pg_dump to a
+                                                                                                           volume
+
+
+
+  13.2 Configuration and profiles
+  Profiles: dev (application on the host, database in Compose), compose (everything in
+  containers), test (Testcontainers) and loadtest (raised limits, refused alongside
+  production settings). Configuration comes from environment variables. A committed
+  .env.example lists them (database URL and credentials, JWT key, allowed CORS origins,
+  rate-limit and cache settings); real values are never committed. An excerpt of the
+  application configuration:
+
+     kitchenflow:
+       rate-limit:
+         login:                           { capacity: 5,                   refill: 5,      period: 10m }
+             order-write:   { capacity: 30, refill: 30, period: 1m }
+             ticket-action: { capacity: 120, refill: 120, period: 1m }
+
+
+
+                                                                                                                    Page 35 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+             report:                      { capacity: 10, refill: 10, period: 1m }
+             sse:                         { per-user: 3, per-address: 20, total: 50 }
+         cache:
+           menu-view:                     { expire-after-write: 5m }
+           app-config:                    { expire-after-write: 60s }
+     spring:
+       datasource:
+         hikari: { maximum-pool-size: 20, minimum-idle: 5, connection-timeout:
+     2000 }
+       lifecycle:
+         timeout-per-shutdown-phase: 20s
+     server:
+       shutdown: graceful
+         tomcat:
+           threads: { max: 100 }
+           accept-count: 100
+
+
+
+  13.3 Continuous integration
+  Stages, in order: checkout, build with Maven, unit tests, integration and concurrency tests
+  with Testcontainers, architecture tests with ArchUnit, static analysis and formatting,
+  coverage gate (at least 70 percent on services and domain), dependency scan (Should),
+  container build, and a smoke test (Compose up, health check, a short k6 script). A failing
+  stage fails the build.
+
+
+  13.4 Environments
+  Local Compose is the primary environment and the demo. CI runs ephemeral containers.
+  An optional cloud demo runs the same Compose stack on one small virtual machine;
+  check current pricing and set a billing alarm first.
+
+
+  13.5 Build order
+  Roadmap phases 1 to 3 run only the application and the database (dev profile). Nginx,
+  observability and backup are added in the polish phase, so infrastructure never delays the
+  Must features. The UI is built against the same API from the first working endpoint.
+
+
+
+
+                                                                                         Page 36 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  14. Architecture decision records
+
+     ID            Decision                           Alternatives                    Rationale              Trade-off
+                                                      considered
+
+     ADR-          Modular monolith                   Microservices;                  One developer;         Scales vertically
+     01                                               unstructured                    order, payment         only
+                                                      monolith                        and kitchen
+                                                                                      changes must be
+                                                                                      atomic (FR-PAY-
+                                                                                      02); enforced
+                                                                                      boundaries keep a
+                                                                                      later split possible
+
+     ADR-          PostgreSQL                         MySQL 8                         Row locks, partial     Less common in
+     02                                                                               indexes,               some shops; the
+                                                                                      percentile             concepts transfer
+                                                                                      functions,
+                                                                                      RETURNING
+
+     ADR-          SSE for real-time                  WebSocket;                      One-way push           One direction
+     03            push                               polling only                    over plain HTTP        only; needs a
+                                                                                      with automatic         fetch-based client
+                                                                                      reconnect; polling     for authentication
+                                                                                      stays as the
+                                                                                      fallback
+
+     ADR-          Stateless JWT                      Server-side                     Serves the web UI      No instant
+     04            with 15-minute                     sessions                        and a future           revocation;
+                   expiry                                                             Android client         bounded to 15
+                                                                                      without a session      minutes
+                                                                                      store
+
+     ADR-          In-process cache                   Redis                           Single instance,       Not shared
+     05            (Caffeine)                                                         reference data         between
+                                                                                      only, no extra         instances (scale
+                                                                                      container;             path in 5.6)
+                                                                                      correctness never
+                                                                                      depends on the
+                                                                                      cache
+
+
+
+
+                                                                                                                             Page 37 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID            Decision                           Alternatives                    Rationale            Trade-off
+                                                      considered
+
+     ADR-          In-memory token-                   Redis-backed                    Two layers with no   Buckets reset on
+     06            bucket limits plus                 limiter; edge limits            new                  restart and are not
+                   Nginx edge limits                  only                            infrastructure;      shared
+                                                                                      per-user keys
+                                                                                      need the
+                                                                                      application layer
+
+     ADR-          React single-page                  Server-rendered                 One API for web      Extra build tooling;
+     07            app served by                      pages; plain                    and future mobile;   plain JavaScript is
+                   Nginx                              JavaScript                      live boards need     the fallback
+                                                                                      client-side state
+
+     ADR-          Order-row lock to                  SERIALIZABLE                    The smallest         Bump, recall and
+     08            serialise READY                    isolation; advisory             mechanism that       cancel on one
+                                                      locks; a counter                closes the lost-     order serialise,
+                                                      column                          READY race and is    which is fine at
+                                                                                      easy to explain      this scale
+
+     ADR-          After-commit                       Events for both; an             Screens never see    At-most-once
+     09            events for push;                   outbox                          rolled-back data;    push, so clients
+                   in-transaction call                                                audit must be        resynchronise
+                   for audit                                                          atomic with the
+                                                                                      change
+
+     ADR-          Pay first, then                    Pay later                       Matches the          No dine-in tab
+     10            kitchen                                                            counter flow of a    flow
+                                                                                      QSR and gives a
+                                                                                      clean state model
+                                                                                      (BR-07)
+
+     ADR-          REST with                          GraphQL                         Simple, cacheable,   More endpoints
+     11            OpenAPI                                                            matches the SRS
+                                                                                      and tooling
+
+     ADR-          Flyway; one                        Hibernate auto-                 Reviewable SQL       Discipline needed
+     12            baseline replaced                  DDL; Liquibase                  and fast early       after the first
+                   until the first                                                    iteration            demo
+                   demo build
+
+
+
+
+                                                                                                                          Page 38 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID            Decision                           Alternatives                        Rationale          Trade-off
+                                                      considered
+
+     ADR-          Idempotency by                     Cache-based de-                     Correct under      An extra table and
+     13            insert-first unique                duplication                         concurrency;       a purge job
+                   key                                                                    reuses
+                                                                                          PostgreSQL's
+                                                                                          unique-index
+                                                                                          blocking
+
+     ADR-          Fetch-based SSE                    Token in the query                  Keeps tokens out   A little more client
+     14            client for                         string; cookies                     of URLs and logs   code
+                   authenticated
+                   streams
+
+
+
+
+  15. Traceability and proposed SRS changes
+
+  15.1 Traceability
+
+     SRS items                                                                 Addressed in section
+
+     FR-AUTH-01 to 07, NFR-SEC-01 to 05                                        10
+
+     FR-MENU-06, NFR-PERF-03                                                   5.3, 5.5, 8.3
+
+     FR-ORD-10, BR-15, NFR-CONC-01                                             6.2, 7.1
+
+     FR-PAY-02, FR-PAY-03                                                      6.2, 7.2
+
+     FR-KDS-05, FR-BRD-02, NFR-PERF-02                                         9
+
+     FR-KDS-06, FR-KDS-07, NFR-CONC-03                                         6.2, 6.3, 7.3
+     and 04
+
+     FR-INV-02, NFR-CONC-02                                                    6.2
+
+     FR-RPT-01 to 06, NFR-PERF-04                                              8.4, 8.5
+
+     FR-AUD-01 to 04                                                           6.2, 8.1
+
+     FR-SYS-01 to 05, NFR-OBS-01 and 02                                        5.1, 12
+
+     NFR-PERF-01                                                               5.4
+
+
+
+
+                                                                                                                            Page 39 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     SRS items                                                                 Addressed in section
+
+     NFR-REL-01 to 03                                                          6, 8.6, 11
+
+     NFR-MNT-01 to 03                                                          4.2, 13.3
+
+     NFR-POR-01, NFR-DOC-01                                                    13
+
+     NFR-USE-01 and 02                                                         Screen design in documents 5 and 6; not
+                                                                               architectural
+
+
+
+  15.2 Proposed SRS changes (for SRS v0.2, through change control)
+   1. Add error code SERVICE_BUSY (HTTP 503) for pool exhaustion and lock timeouts.
+   2. FR-AUTH-06: state that lockout counters are persisted on the user and that the LOGIN
+       rate limit applies in addition.
+   3. Add NFR-SEC-06: rate limits shall sit well above the design workload, and the load test
+      shall show no 429 responses at that workload.
+   4. Add NFR-PERF-05: report endpoints shall be limited to 2 concurrent queries so they
+       cannot starve order creation.
+   5. FR-KDS-05: add that authenticated streams close when the access token expires and
+       clients resynchronise on reconnect.
+   6. FR-MENU-06: add ETag support, returning 304 when the menu is unchanged.
+   7. Record OI-02 and OI-03 as closed by this document.
+
+
+
+
+                                                                                                                         Page 40 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  16. Low-level design appendix
+
+  16.1 Package structure
+
+     com.kitchenflow
+       KitchenFlowApplication
+       platform/                  error, correlation, ratelimit, cache, sse, scheduling,
+     security
+       auth/                      api, application, domain, infrastructure
+         menu/                    api, application, domain, infrastructure
+         inventory/               api, application, domain, infrastructure
+         order/                   api, application, domain, infrastructure, spi (TicketGateway)
+         payment/                 api, application, domain, infrastructure
+         kitchen/                 api, application, domain, infrastructure
+         board/                   api, application
+         report/                  api, application, infrastructure
+         audit/                   api, application, domain, infrastructure
+         config/                  api, application, domain, infrastructure
+
+
+
+  16.2 Key components
+
+     Component                                             Module                 Responsibility
+
+     GlobalExceptionHandler                                platform               Maps exceptions to the error envelope and
+                                                                                  HTTP codes (SRS section 10)
+
+     CorrelationFilter                                     platform               Accepts or generates the correlation ID and
+                                                                                  fills the logging context
+
+     RateLimitFilter,                                      platform               Resolve class and key, consume a bucket,
+     RateLimitPolicy                                                              answer 429 with Retry-After
+
+     ReportBulkhead                                        platform               Semaphore with 2 permits around report
+                                                                                  queries
+
+     SseHub, SseSubscriber                                 platform               Subscriber registry, bounded queues,
+                                                                                  heartbeat, cleanup, connection caps
+
+     MenuCache                                             menu                   Loading cache and ETag version; evicts on
+                                                                                  MenuChanged
+
+     OrderController,                                      order                  Use cases: create, edit, cancel, complete,
+     OrderService                                                                 search
+
+
+
+                                                                                                                               Page 41 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Component                                             Module                 Responsibility
+
+     PricingService                                        order                  BigDecimal line pricing and GST; pure and
+                                                                                  unit-tested
+
+     TokenService                                          order                  Allocates tokens from the daily counter row
+
+     IdempotencyService                                    order                  Insert-first key handling, hash check, replay
+
+     OrderStateMachine                                     order                  Transition table with roles and guards
+
+     OrderWorkflow                                         order                  Compare-and-set transitions used by
+                                                                                  payment and kitchen
+
+     UnpaidOrderJob                                        order                  Cancels timed-out unpaid orders using SKIP
+                                                                                  LOCKED
+
+     TicketGateway                                         order                  Interface to create and cancel tickets;
+                                                           (spi)                  implemented by kitchen
+
+     StockService                                          inventory              Conditional decrements in item-id order;
+                                                                                  restore; adjust
+
+     PaymentService                                        payment                Payment recording and the payment-to-
+                                                                                  kitchen transaction
+
+     TicketService, TicketFactory                          kitchen                Start, bump, recall with the order lock and
+                                                                                  READY evaluation; group lines by station
+
+     AuditService                                          audit                  In-transaction record() and search
+
+     ReportService                                         report                 SQL read models with statement timeout
+
+
+
+  16.3 Order state machine sketch
+
+     enum OrderStatus { CREATED, PAID, IN_KITCHEN, READY, COMPLETED, CANCELLED }
+
+
+     record Transition(OrderStatus from, OrderStatus to, Set<Role> roles) {}
+
+
+     final class OrderStateMachine {
+         private static final List<Transition> RULES = List.of(
+             new Transition(CREATED,    PAID,       Set.of(CASHIER, MANAGER)),
+                     new Transition(PAID,       IN_KITCHEN, Set.of(SYSTEM)),
+                     new Transition(IN_KITCHEN, READY,      Set.of(SYSTEM)),
+                     new Transition(READY,                               IN_KITCHEN, Set.of(KITCHEN, MANAGER)),
+
+
+
+
+                                                                                                                             Page 42 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+                     new Transition(READY,                               COMPLETED,   Set.of(CASHIER, MANAGER)),
+                     new Transition(CREATED,                             CANCELLED,   Set.of(CASHIER, MANAGER,
+     SYSTEM)),
+             new Transition(IN_KITCHEN, CANCELLED,                                    Set.of(MANAGER)));
+
+
+             void check(OrderStatus from, OrderStatus to, Role actor) {
+                 boolean allowed = RULES.stream().anyMatch(t ->
+                         t.from() == from && t.to() == to && t.roles().contains(actor));
+                     if (!allowed) throw new InvalidTransitionException(from, to);
+             }
+     }
+
+
+
+  16.4 Bump sketch (lock order first)
+
+     @Transactional
+     public TicketView bump(long ticketId, long expectedVersion, Actor actor) {
+         long orderId = tickets.orderIdOf(ticketId);          // plain read
+         Order order = orders.lockForUpdate(orderId);          // SELECT ... FOR
+     UPDATE, order first
+         Ticket t     = tickets.get(ticketId);                                                   // read after the
+     lock
+             access.checkStation(actor, t.stationId());
+             if (t.version() != expectedVersion) throw new StaleVersionException(t);
+         t.transitionTo(TicketStatus.DONE, clock.instant());   // state machine
+     guard
+         if (order.status() == IN_KITCHEN && tickets.countOpen(orderId) == 0) {
+             orderWorkflow.markReady(order, actor);                                             // compare-and-set
+     plus audit
+             }
+             audit.record(actor, AuditAction.TICKET_BUMPED, t.id(), order.id());
+             events.publish(new TicketChanged(t));                 // delivered after
+     commit
+         return TicketView.of(t);
+     }
+
+
+
+  16.5 Conventions
+         DTOs are Java records; entities never leave the application layer.
+         Money is a value object over BigDecimal with scale 2 and HALF_UP rounding.
+         Time comes from an injected Clock, so timers and business-day logic are testable.
+         Domain exceptions map to error codes in one place.
+
+
+
+                                                                                                                   Page 43 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+       Every public service method that changes state declares its transaction and the roles
+       allowed to call it.
+
+
+  17. Risks, open items and next step
+
+  17.1 Risks
+
+     Risk                                                         Impact              Mitigation
+
+     Infrastructure work (Nginx,                                  Must features       Add them only in the polish
+     observability) crowds out core                               arrive late         phase; phases 1 to 3 run the
+     features                                                                         application and database only
+
+     Over-engineering is hard to                                  Lost credibility    Every component has an ADR;
+     defend in an interview                                                           scale-out items are documented,
+                                                                                      not built
+
+     SSE and proxy pitfalls                                       Delayed or lost     Proxy settings in 9.6, the 2-
+                                                                  updates             second polling fallback and the
+                                                                                      reconnect test AT-09
+
+     Concurrency bugs go unnoticed                                Wrong orders        Concurrency tests repeated 50
+                                                                  under load          times and the mutation check
+                                                                                      (6.6)
+
+     Learning load (Spring Security,                              Schedule slips      Learning map in SRS section 13;
+     JPA locking, React, Docker, Nginx)                                               plain-JavaScript UI fallback;
+                                                                                      phase gating
+
+     Limits set too tight for the demo                            False 429           Limits are 12 times above the
+                                                                  responses           design workload; the loadtest
+                                                                                      profile is for k6 only
+
+     Cache and limiter design is                                  Weak interview      Be able to say why in-process,
+     misunderstood                                                answers             what is never cached and how
+                                                                                      stale reads are prevented
+
+
+
+
+                                                                                                                   Page 44 of 45
+System Architecture Document: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  17.2 Open items
+
+     ID            Item                                                               When
+
+     AI-01         Pin exact versions (Java, Spring Boot, PostgreSQL,                 Phase 0
+                   Nginx, React, Bucket4j, Caffeine)
+
+     AI-02         Confirm React or the plain-JavaScript fallback                     Start of phase 2
+                   after a one-day spike
+
+     AI-03         Decide whether to include Prometheus and                           Phase 4
+                   Grafana or stop at Actuator metrics and logs
+
+     AI-04         Apply the changes in 15.2 to the SRS as v0.2                       Before document 5
+
+     AI-05         Your deadline, which sets how much of sections 5                   Roadmap review
+                   and 12 is built in time
+
+
+
+  17.3 Next step
+  Document 4, the Database Design: DDL-level schema for every table, constraints and
+  indexes, EXPLAIN targets, the seed-data and 100,000-order generator design, and the
+  Flyway baseline plan. It builds directly on sections 6 and 8 of this document.
+
+
+     Version          Date                             Author          Change
+
+     0.1              29 October 2026                  Rathi           First draft
+
+
+
+
+                                                                                                          Page 45 of 45
+
