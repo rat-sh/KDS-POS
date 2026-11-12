@@ -1,0 +1,3171 @@
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  Test Plan and Test Cases: KitchenFlow
+  Restaurant Order & Kitchen Display System
+  Document ID: KF-TPL-001 · Version 0.1 (draft) · 30 October 2026 · Author: Rathi · Related:
+  KF-PDD-001, KF-SRS-001, KF-SAD-001, KF-DBD-001, KF-API-001, KF-LLD-001
+
+
+  1. Introduction
+
+  1.1 Purpose
+  This is document 7 of 7. It defines how KitchenFlow is shown to work: the strategy, the
+  environments and data, the test cases (what to do and what must happen), the pass
+  criteria, and the trace from every requirement to the tests that prove it. It also closes the
+  document set: section 17 gathers the changes that documents 3 to 6 proposed to earlier
+  documents into one register, so nothing is lost.
+
+
+  1.2 Scope
+  In scope: the backend, the database, the REST and streaming API, and the deployed stack
+  (Compose and Nginx). The screens are covered only where a requirement states a
+  behaviour (timing, readability, the demo). Out of scope: third-party penetration testing,
+  multi-outlet operation, and real payment gateways.
+
+
+  1.3 How to use this document
+  The plan lives here; the executable tests live in the repository, and every test method
+  carries its case ID in its name (LLD 6.4). A case lists the requirement IDs it proves, so a
+  failing test points straight back to a requirement and a passing suite can be traced
+  forward to coverage.
+
+
+     Family           Meaning                                                     Section
+
+     UT               Unit tests of pure logic                                    4
+
+     AR               Architecture and static checks                              5.2
+
+     DB               Database and migration tests                                5.1
+
+     WS               Web-layer tests: envelope, strictness, content              6.5
+                      negotiation
+
+
+
+                                                                                            Page 1 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Family           Meaning                                                     Section
+
+     CT               Contract tests: one per row of every API case table         6.1
+
+     PC               Post-condition suites: what must (and must not)             6.3
+                      change after an operation
+
+     RM               Role matrix                                                 6.4
+
+     CC               Concurrency and mutation tests                              7
+
+     SS               Stream tests                                                8
+
+     RL, CA           Rate-limit and cache tests                                  9
+
+     SC               Security tests                                              10
+
+     RS               Resilience and fault tests                                  11
+
+     PF               Performance and load tests                                  12
+
+     AT               Acceptance scenarios (SRS section 12.2)                     13
+
+     US, DM           Usability checks and the demo                               14
+
+
+  Cases are written as Given, When, Then. Numbers in cases are the values to assert, taken
+  from the documents (for example the 513.72 order of the API document).
+
+
+  2. Test strategy
+
+  2.1 Objectives
+     1. Prove the correctness invariants under concurrency: no duplicate, lost, oversold or
+        stuck orders (SRS goal G1).
+     2. Prove the API contract, including every error case in the API document.
+     3. Prove real-time behaviour and recovery: screens update within 1 second and heal
+        after a disconnect.
+     4. Prove protection and resilience: access control, limits, overload and fault behaviour.
+     5. Keep the proof cheap enough to run on every commit, and honest: each protection
+        has a mutation variant that must fail when the protection is removed.
+
+
+
+
+                                                                                            Page 2 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  2.2 Risk-based emphasis
+
+     Risk                                                                         Impact       Where the effort goes
+
+     Duplicate or lost order under retries and                                    Very         CC-01, CC-05, CC-08, AT-03
+     concurrency                                                                  high
+
+     Overselling the last item                                                    Very         CC-02, AT-04
+                                                                                  high
+
+     An order stuck in IN_KITCHEN, never                                          High         CC-04 with its mutation variant, AT-
+     READY                                                                                     01, AT-06
+
+     Wrong money (rounding, tax, totals)                                          High         UT-01, UT-02, DB-04, the contract
+                                                                                               totals
+
+     Unauthorised access or privilege                                             High         RM-01, SC-01 to SC-08, AT-08
+     escalation
+
+     Screens stale or silent after a fault                                        High         SS-01 to SS-14, AT-09, PF-02
+
+     Overload, abuse, retry storms                                                Medium       RL-01 to RL-12, PF-07, RS-04
+
+     Data left inconsistent after a failure                                       High         RS-01, RS-02, the consistency
+                                                                                               queries C1 to C7
+
+     Slow queries at volume                                                       Medium       DB-09, PF-03 to PF-05
+
+     Silent drift of the documented contract                                      Medium       CT, the case-coverage and drift
+                                                                                               checks
+
+
+
+  2.3 Levels
+
+     Level                             Purpose                                           Written in         Runs
+                                                                                         phase
+
+     Unit                              Pure rules in milliseconds                        With each class    Every commit
+                                                                                         (LLD section 7)
+
+     Web slice                         Envelope, strict JSON,                            Phase 1            Every commit
+                                       content negotiation, URL
+                                       roles
+
+
+
+
+                                                                                                                                 Page 3 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Level                             Purpose                                    Written in       Runs
+                                                                                  phase
+
+     Integration and                   Real PostgreSQL and the                    Phases 1 to 3    Every commit
+     contract                          real migration; API case
+                                       tables
+
+     Concurrency                       The invariants of SAD 6.2,                 Phases 2 and 3   Every commit
+                                       repeated 50 times                                           (shortened) and
+                                                                                                   nightly (full)
+
+     Streams                           Delivery, recovery, limits                 Phase 2          Every commit
+
+     Security and                      Attacks, faults, overload                  Phases 3 and 4   Nightly and before
+     resilience                                                                                    release
+
+     Performance                       NFR-PERF targets on                        Phase 4          Before release; a
+                                       100,000 orders                                              smoke version in CI
+
+     Acceptance                        The 11 SRS scenarios end                   Phases 2 to 4    Before release and
+                                       to end                                                      before every demo
+
+
+
+  2.4 Principles
+         Test first. Each build step in LLD section 7 begins with its failing tests.
+         Deterministic. No Thread.sleep: asynchronous assertions use Awaitility with a
+         timeout. Time comes from a controllable Clock; random data uses fixed seeds; bucket
+         refill uses an injected time meter.
+         Independent. Each test builds the data it needs and never relies on another test's
+         leftovers or on execution order.
+         Real database. Integration tests run the real Flyway migration, the real roles and real
+         constraints; the database is never mocked.
+         Prove the protection. For each lock, constraint or compare-and-set that exists for
+         correctness there is a variant with it removed, and the test must then fail (LLD 6.2).
+         Flaky means broken. A test that fails intermittently is a defect in the test or in the
+         code. It is fixed within 2 working days or deleted; it is never retried until green.
+
+
+
+
+                                                                                                                         Page 4 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  2.5 Entry and exit criteria
+
+     Gate                                                 Criteria
+
+     Start of a build step                                The relevant design sections are read; the previous
+                                                          step is green; the step's tests are written and
+                                                          failing
+
+     End of phase 1                                       Unit and web-slice tests green; role matrix green
+                                                          for every implemented endpoint; the 4 schema
+                                                          checks and C1 to C7 clean on seed data
+
+     End of phase 2                                       AT-01, AT-05, AT-06, AT-09 and AT-11 pass; CC-03
+                                                          and CC-04 pass with their mutation variants
+
+     End of phase 3                                       All CC cases pass 50 repeats; RL and CA cases
+                                                          pass; AT-02, AT-03, AT-04, AT-07, AT-08 and AT-10
+                                                          pass
+
+     End of phase 4                                       PF-01 to PF-05 meet their thresholds on the
+                                                          100,000-order dataset; every CI gate green; the
+                                                          demo script rehearsed twice
+
+     Release (demo or interview)                          Every Must requirement has at least one passing
+                                                          test; all 11 acceptance scenarios pass; no open Sev 1
+                                                          or Sev 2 defect; coverage at least 70 percent on
+                                                          service and domain code; the traceability matrix
+                                                          (section 15) has no empty row; the change register
+                                                          (section 17) is applied or consciously deferred
+
+
+
+  2.6 Defect handling
+
+     Severity           Meaning                                            Examples               Rule
+
+     Sev 1              Data corruption, duplicate                         Two payments           Fix before anything
+                        or oversold order, security                        recorded; a Kitchen    else; add a regression
+                        bypass                                             user changes another   test first
+                                                                           station
+
+     Sev 2              A Must requirement is not                          Order never reaches    Fix before the phase
+                        met and there is no                                READY; wrong GST       gate
+                        workaround                                         total
+
+
+
+
+                                                                                                                      Page 5 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Severity           Meaning                                            Examples                    Rule
+
+     Sev 3              A Should or Could                                  Missing audit field;        Fix before release or
+                        requirement is not met, or                         wrong field code            defer in writing
+                        a documented case is
+                        wrong
+
+     Sev 4              Cosmetic or                                        Typo in a message           Fix when convenient
+                        documentation
+
+
+  Every defect gets a failing test before the fix and keeps that test. Defects are tracked as
+  GitHub issues labelled with the severity and the case ID that found them.
+
+
+  2.7 Metrics and reporting
+  At the end of each phase, one page: tests run and passed per family; line coverage of
+  service and domain code (JaCoCo); requirement coverage from section 15; concurrency
+  repeat results (failures must be zero); mutation variants that failed as intended;
+  performance numbers against thresholds; open defects by severity. The same numbers
+  decide the release criteria in 2.5.
+
+
+  2.8 Roles
+  One developer writes code and tests. A reviewer (a senior, a friend or a mentor) reads this
+  plan, the concurrency tests and the demo script, and watches one full acceptance run.
+  Before each merge the developer applies a self-review checklist: tests first, case IDs in
+  names, no sleeps, no shared data, every new endpoint in the role table and the case files.
+
+
+  3. Environments, tools and data
+
+  3.1 Environments
+
+     Environment                      Composition                                           Used for
+
+     Local                            Application in the IDE or in                          Writing and running unit, slice and
+     development                      Compose, PostgreSQL in Compose,                       integration tests
+                                      profile dev
+
+
+
+
+                                                                                                                           Page 6 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Environment                      Composition                                           Used for
+
+     CI                               GitHub Actions runner,                                Every commit: build, tests,
+                                      Testcontainers for PostgreSQL                         architecture checks, coverage
+                                                                                            gate, container build, smoke test
+
+     Performance                      A laptop-class machine (4 cores, 8                    PF cases; the reference machine
+                                      GB) running the full Compose                          named in the SRS
+                                      stack, profile loadtest, 100,000-
+                                      order dataset
+
+     Demo                             Compose with Nginx, seed data,                        Acceptance run and the 5-minute
+                                      normal limits                                         demo
+
+
+
+  3.2 Tools
+
+     Tool                                                                 Use
+
+     JUnit 5, AssertJ                                                     Test framework and assertions
+
+     Mockito                                                              Only for collaborators outside the unit under test;
+                                                                          never for the database
+
+     Spring Boot Test, MockMvc                                            Web slice tests
+
+     RestAssured                                                          Black-box tests against the running application
+
+     Testcontainers                                                       Real PostgreSQL (and Nginx for the proxy checks)
+
+     Awaitility                                                           Waiting for asynchronous effects with a timeout
+
+     ArchUnit                                                             Architecture rules
+
+     JaCoCo                                                               Coverage and the 70 percent gate
+
+     k6                                                                   Load, stress and smoke scenarios
+
+     openapi-diff                                                         Compatibility of the generated OpenAPI against
+                                                                          the last release
+
+     Bruno or Postman                                                     Manual exploration and the demo collection
+
+     Secret scanner and dependency scan                                   Repository and library hygiene (SC-15, SC-16)
+
+
+
+
+                                                                                                                            Page 7 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  3.3 Test data
+
+     Dataset                             Content                                  Used by
+
+     Built per test                      TestData builders: user(role),           Almost every integration test
+                                         station, category, item(price,
+                                         stations, stock), modifier group,
+                                         combo, order in a chosen status
+
+     Seed (demo)                         DBD section 10: 9 users, 4 stations,     Acceptance run, demo, seed
+                                         5 categories, 30 items, 4 modifier       tests
+                                         groups, stock for 4 items
+
+     Known report                        About 40 hand-built orders over 3        Report ground truth (CT for R-01
+     dataset                             business days, with expected             to R-05, AT-10)
+                                         report figures worked out by hand
+                                         and stored beside it
+
+     Performance                         The 100,000-order generator of           DB-09, PF cases
+     dataset                             DBD 10.6
+
+
+  Isolation. Between test classes a cleaner truncates every table except the Flyway history
+  and the reference data, as the schema owner (kf_app has no TRUNCATE). Inside a class
+  every test creates uniquely named data. Database-backed classes run one after another;
+  unit tests run in parallel.
+
+
+  3.4 Time, randomness and configuration
+         A MutableClock bean replaces the system clock in the test profile and can be
+         advanced, so lockout windows, the recall window, token expiry and the business-day
+         cutoff are tested without waiting.
+         Rate-limit buckets take an injected time meter, so refill is tested instantly (RL-01).
+         The test profile shortens intervals that are fixed in production: the stream heartbeat
+         (200 ms) and token lifetime. This needs the sse heartbeat to be a configuration
+         property (change 14 in section 17).
+         Generators and load scripts use fixed seeds, so a failure can be reproduced.
+
+
+
+
+                                                                                                               Page 8 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  3.5 Accounts, secrets and artefacts
+  Test users and passwords come from the TestData builders and the test profile; the JWT
+  key in tests is a constant that is never used elsewhere. No real secret appears in the
+  repository (SC-15). Every run keeps its reports as build artefacts: surefire and failsafe
+  results, the JaCoCo report, k6 summaries, and the saved EXPLAIN plans.
+
+
+  4. Unit test cases
+  Unit tests need no Spring context. The branch coverage target for Money, PricingService,
+  BusinessDayService, the two state machines and SlaCalculator is 100 percent.
+
+
+  4.1 UT-01 Money arithmetic and rounding
+
+     Case                                     Input                                    Expected
+
+     Tie rounds up                            0.10 at 5.00 percent (0.005)             0.01
+
+     Tie rounds up                            0.30 at 5.00 percent (0.015)             0.02
+
+     Tie rounds up                            0.50 at 5.00 percent (0.025)             0.03
+
+     Below a tie                              12.34 at 18.00 percent (2.2212)          2.22
+
+     Plain GST                                99.00 at 18.00 percent                   17.82
+
+     Plain GST                                378.00 at 5.00 percent                   18.90
+
+     Zero rate                                250.00 at 0.00 percent                   0.00
+
+     Largest values                           99999.99 at 28.00 percent (27999.9972)   28000.00
+
+     Multiplication                           189.00 times 2                           378.00
+
+     Addition                                 99.00 plus 17.82                         116.82
+
+     Comparison                               10.00 compared with 9.99                 Greater
+
+     Wrong scale                              A Money built from 1.5                   IllegalArgumentException
+     rejected
+
+     Parse                                    Money.parse of 1.50 succeeds; of 1.5     As stated
+                                              fails
+
+
+
+
+                                                                                                           Page 9 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  4.2 UT-02 Order pricing vectors
+  Each vector gives lines as unit price, modifier total, quantity and GST rate. The same
+  vectors are inserted through SQL in DB-04 to prove the database CHECK constraints
+  agree with Java.
+
+
+     Vector                               Lines                                         Expected totals
+
+     A (the API                           169.00 with Hot 0.00 and Extra                Line 1: subtotal 378.00, tax 18.90,
+     example)                             cheese 20.00, quantity 2, 5.00                total 396.90. Line 2: subtotal 99.00,
+                                          percent; 69.00 with Large 30.00,              tax 17.82, total 116.82. Order:
+                                          quantity 1, 18.00 percent                     subtotal 477.00, tax 36.72, total
+                                                                                        513.72
+
+     B (mixed rates)                      99.00 x 1 at 5 percent; 49.00 x 3             Taxes 4.95, 7.35 and 23.22; subtotal
+                                          at 5 percent; 129.00 x 1 at 18                375.00, tax 35.52, total 410.52
+                                          percent
+
+     C (tax is rounded                    Two lines of 0.10 x 1 at 5 percent            Each line tax 0.01, so order tax 0.02
+     per line)                                                                          and total 0.22 (rounding the order
+                                                                                        once would give 0.01)
+
+     D (negative                          99.00 with a modifier of minus                Subtotal 178.00, tax 8.90, total
+     modifier)                            10.00, quantity 2, 5 percent                  186.90
+
+     E (the ceiling)                      99999.99 x 50 at 28 percent                   Subtotal 4999999.50, tax
+                                                                                        1399999.86, total 6399999.36; fits
+                                                                                        NUMERIC(12,2)
+
+
+
+  4.3 UT-03 and UT-04 JSON for money and instants
+
+     Case                                   Input                                 Expected
+
+     Valid money string                     129.00 as a string                    Accepted
+
+     Number instead of                      129.00 as a JSON                      Type mismatch, mapped to 400
+     string                                 number                                MALFORMED_REQUEST
+
+     Wrong scale                            129.5 and 129.500 as                  INVALID_SCALE
+                                            strings
+
+     Not a number                           abc                                   INVALID_FORMAT
+
+
+
+
+                                                                                                                           Page 10 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Case                                   Input                                 Expected
+
+     Negative where                         -5.00                                 INVALID_FORMAT; accepted by the
+     unsigned                                                                     signed variant
+
+     Too many integer                       12345678901.00                        INVALID_FORMAT
+     digits
+
+     Blank                                  An empty string                       REQUIRED
+
+     Money out                              Money 5.00                            The string 5.00
+
+     Instant with 0 ms                      2026-10-30T09:15:30Z                  Written as 2026-10-30T09:15:30.000Z
+
+     Instant with 100 ms                    2026-10-30T09:15:30.1Z                Written as 2026-10-30T09:15:30.100Z
+
+
+
+  4.4 UT-05 Business day (cutoff 04:00, Asia/Kolkata)
+
+     Instant                                                                          Expected business day
+
+     2026-10-31 03:59:59 IST                                                          2026-10-30
+
+     2026-10-31 04:00:00 IST                                                          2026-10-31
+
+     2026-10-30T22:30:00Z (04:00 IST on 31 October)                                   2026-10-31
+
+     2026-10-31 00:00:00 IST                                                          2026-10-30
+
+     2026-10-31 23:59:59 IST                                                          2026-10-31
+
+     With the cutoff changed to 05:00: 2026-10-31 04:30                               2026-10-30
+     IST
+
+     With the cutoff at 00:00: any time on 31 October                                 2026-10-31
+
+
+
+  4.5 UT-06 Order state machine
+  The test generates all 180 combinations (6 from-states, 6 to-states, 5 roles including
+  SYSTEM) and compares each with an independently written expected table. No rule for
+  the pair gives 409; a rule that excludes the role gives 403.
+
+
+
+
+                                                                                                                        Page 11 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Transition                                                  Allowed roles                 Other roles   Notes
+
+     CREATED to PAID                                             CASHIER,                      403
+                                                                 MANAGER
+
+     PAID to IN_KITCHEN                                          SYSTEM                        403
+
+     IN_KITCHEN to READY                                         SYSTEM                        403
+
+     READY to IN_KITCHEN                                         KITCHEN,                      403           Recall
+                                                                 MANAGER
+
+     READY to COMPLETED                                          CASHIER,                      403
+                                                                 MANAGER
+
+     CREATED to CANCELLED                                        CASHIER,                      403
+                                                                 MANAGER, SYSTEM
+
+     IN_KITCHEN to CANCELLED                                     MANAGER                       403           A Cashier gets
+                                                                                                             403, not 409
+
+     READY to CANCELLED                                          None                          409 for
+                                                                                               every role
+
+     Any state to COMPLETED or                                   None                          409 for
+     CANCELLED when already final                                                              every role
+
+     Skips and repeats, for example                              None                          409 for
+     CREATED to IN_KITCHEN,                                                                    every role
+     CREATED to READY, PAID to
+     CANCELLED, CREATED to
+     CREATED
+
+
+
+  4.6 UT-07 Ticket transitions
+
+     Transition                                                                   Expected
+
+     NEW to IN_PROGRESS                                                           Allowed; startedAt set
+
+     IN_PROGRESS to DONE                                                          Allowed; doneAt set
+
+     DONE to IN_PROGRESS (recall)                                                 Allowed; doneAt cleared; recallCount plus 1;
+                                                                                  startedAt unchanged
+
+
+
+
+                                                                                                                           Page 12 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Transition                                                                   Expected
+
+     NEW or IN_PROGRESS to CANCELLED                                              Allowed; cancelledAt set
+
+     NEW to DONE; DONE to NEW; DONE to                                            INVALID_TRANSITION
+     CANCELLED; IN_PROGRESS to NEW;
+     DONE to DONE; any move from
+     CANCELLED
+
+
+  After every legal transition in the integration variant, the row is written and the CHECK
+  constraints ck_ticket_started, ck_ticket_done and ck_ticket_cancel hold.
+
+
+  4.7 UT-08 SLA colour (target 300 seconds, amber 80, red 100)
+  The colour compares exact products, not a truncated percent: red when age x 100 is
+  above red x target. The 301-second vector guards that rule, because a truncated percent
+  would read 100 and stay amber.
+
+
+     Age in seconds                                                                Percent       Colour
+
+     0                                                                             0             GREEN
+
+     239                                                                           79            GREEN
+
+     240                                                                           80            AMBER
+
+     299 and 300                                                                   99 and 100    AMBER
+
+     301                                                                           100           RED
+
+     450                                                                           150           RED
+
+     DONE ticket created 09:00, done 09:03, read                                   60            GREEN (the age stops at
+     at 09:30                                                                                    doneAt)
+
+     Thresholds changed to amber 50, red 90: age                                   50 and 90     AMBER and RED
+     150 and age 271
+
+     Target of 1 second: age 1 and age 2                                           100 and       AMBER and RED
+                                                                                   200
+
+
+
+
+                                                                                                                           Page 13 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  4.8 UT-09 Password policy
+
+     Password                                                                            Expected
+
+     7 bytes                                                                             TOO_SHORT
+
+     8 bytes                                                                             Accepted
+
+     72 bytes                                                                            Accepted
+
+     73 bytes                                                                            TOO_LONG
+
+     40 characters that are 2 bytes each (80 bytes)                                      TOO_LONG, although 40 characters
+
+     Equal to the username                                                               WEAK_PASSWORD
+
+     Equal to the current password (change-password)                                     WEAK_PASSWORD
+
+     On the common-password list, for example                                            WEAK_PASSWORD
+     password123
+
+
+
+  4.9 UT-10 OrderValidator
+
+     Input                                                                        Expected error
+
+     No lines; 31 lines                                                           TOO_FEW; TOO_MANY on lines
+
+     Quantity 0; quantity 51                                                      OUT_OF_RANGE on lines[i].quantity
+
+     Both itemId and comboId; neither                                             ONE_OF_REQUIRED on lines[i]
+
+     Unknown itemId                                                               UNKNOWN_ID on lines[i].itemId
+
+     Unavailable item; inactive item                                              ITEM_UNAVAILABLE
+
+     Only unavailable items                                                       Top-level code ITEM_UNAVAILABLE
+
+     An unavailable item and quantity 0                                           Top-level VALIDATION_FAILED with both
+     together                                                                     errors
+
+     Modifier of another item                                                     MODIFIER_NOT_ALLOWED
+
+     Inactive modifier                                                            MODIFIER_UNAVAILABLE
+
+     The same modifier id twice                                                   DUPLICATE_VALUE
+
+     Group with minimum 1 and no selection                                        MODIFIER_MIN (message names the group)
+
+
+
+                                                                                                                          Page 14 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Input                                                                        Expected error
+
+     SINGLE group with two selections;                                            MODIFIER_MAX
+     MULTIPLE group (maximum 3) with four
+
+     modifierIds on a combo line                                                  NOT_APPLICABLE
+
+     Note of 201 characters; note with a control                                  TOO_LONG; INVALID_CHARACTERS
+     character
+
+     orderType missing; DRIVE_THRU                                                REQUIRED; INVALID_ENUM
+
+     A line with quantity 0 that also names an                                    Only the quantity error: a malformed line is
+     unknown modifier                                                             not checked against the menu
+
+
+
+  4.10 UT-11 to UT-17 Other pure logic
+
+     ID          Subject                        Cases
+
+     UT-         Idempotency                    Same body with keys in another order: equal. Extra whitespace:
+     11          hash                           equal. Two lines swapped: different. One quantity changed:
+                                                different
+
+     UT-         Cursor codec                   Round trip; changed payload, changed signature, truncated value
+     12                                         and wrong key are all rejected
+
+     UT-         Rate-limit                     POST /orders, PUT /orders/9, PATCH /orders/9/rush, POST
+     13          classification                 /orders/9/payments give ORDER_WRITE; POST /tickets/5/bump
+                                                gives TICKET_ACTION; GET /menu and GET /orders give READ;
+                                                GET /reports/sales and GET /audit give REPORT; POST
+                                                /admin/items and PATCH /items/3/availability give ADMIN_WRITE;
+                                                GET /board gives BOARD_READ keyed by address; GET
+                                                /stream/stations/1 gives SSE_CONNECT keyed by user; GET
+                                                /stream/board gives SSE_CONNECT keyed by address; POST
+                                                /auth/refresh gives REFRESH; health, static files and POST
+                                                /auth/login give no class in the filter
+
+     UT-         Order number                   (30 Oct 2026, 17) gives KF-20261030-0017; token 9999 gives -9999;
+     14                                         token 10000 gives KF-20261030-10000
+
+     UT-         Configuration                  Each range of API 7.2; amber at or above red rejected;
+     15          rules                          business_day_cutoff outside 00:00 to 08:00 rejected; amber and
+                                                red validated against values already stored
+
+
+
+
+                                                                                                                            Page 15 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID          Subject                        Cases
+
+     UT-         Ticket                         A burger on Fry and Assembly plus a cola on Beverage gives three
+     16          grouping                       tickets, the burger on both of its tickets; target seconds is the
+                                                largest on each ticket; a combo expands into its components; a line
+                                                with no active station raises IllegalStateException
+
+     UT-         Cancel policy                  Which role may cancel in which state; the stock difference of an
+     17          and stock                      edit, per item in ascending id order
+                 maths
+
+
+
+
+  5. Database and architecture tests
+
+  5.1 Database tests
+
+     ID          Test                                                             Expected                 Proves
+
+     DB-         Run roles.sql and V1 on an empty container                       No error; Flyway         NFR-
+     01                                                                           validate passes          REL-03
+
+     DB-         The four schema checks of DBD 11.4                               Zero rows each           DD-03,
+     02                                                                                                    DD-04
+
+     DB-         Insert a duplicate for every UNIQUE constraint:                  SQLSTATE 23505 each      DR-04
+     03          uq_orders_number, uq_orders_day_token,
+                 uq_payment_order, uq_idem_user_key,
+                 uq_ticket_order_station,
+                 uq_app_user_username (also with other letter
+                 case), uq_station_name, uq_category_name,
+                 uq_menu_item_name (other case),
+                 uq_combo_name, uq_modifier_name,
+                 uq_rt_hash, uq_ol_order_line, the refund-once
+                 index
+
+
+
+
+                                                                                                               Page 16 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID          Test                                                             Expected                   Proves
+
+     DB-         For each CHECK, insert a violating row and a                     23514 for violations;      DR-03,
+     04          boundary-valid row: ck_orders_money,                             boundary rows              BR-02,
+                 ck_orders_paid, ck_orders_cancel, ck_ol_qty (0                   accepted                   BR-03
+                 and 51 fail; 1 and 50 pass), ck_ol_sub, ck_ol_tax
+                 (off by 0.01), ck_ol_total, ck_ol_target (both or
+                 neither), ck_stock_qty, ck_ticket_started,
+                 ck_ticket_done, ck_ticket_cancel,
+                 ck_payment_amount, ck_payment_cash,
+                 ck_mg_range, ck_mg_single, ck_category_gst
+                 (28.01 fails, 28.00 passes), ck_item_price,
+                 ck_user_role; plus the UT-02 vectors
+
+     DB-         Insert an order line for a missing order; delete a               23503                      DR-03,
+     05          referenced menu item                                                                        DR-05
+
+     DB-         As kf_app: UPDATE and DELETE on                                  The first four fail with   FR-
+     06          audit_event; any DDL; DELETE on orders;                          permission denied; the     AUD-
+                 TRUNCATE. Then DELETE on item_station                            last succeeds              02, DR-
+                                                                                                             09
+
+     DB-         As the schema owner, UPDATE and DELETE on                        The trigger raises the     FR-
+     07          audit_event                                                      append-only exception      AUD-
+                                                                                                             02
+
+     DB-         Insert 120 tickets through JPA and count the                     Ids step by 50; at most    SAD 5.5
+     08          batches                                                          3 insert batches, so
+                                                                                  batching works (DD-
+                                                                                  02)
+
+     DB-         EXPLAIN (FORMAT JSON) for the statements                         The named index            DR-07
+     09          of DBD 7.2 on the 100,000-order dataset                          appears; no sequential
+                                                                                  scan on orders, ticket
+                                                                                  or audit_event; no Sort
+                                                                                  for S6
+
+     DB-         Consistency queries C1 to C7 after (a) the                       Zero rows each             BR-01,
+     10          acceptance run, (b) the generator, (c) the                                                  BR-06,
+                 concurrency suite                                                                           BR-07,
+                                                                                                             DD-09
+
+
+
+
+                                                                                                                Page 17 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID          Test                                                             Expected                   Proves
+
+     DB-         Run the generator on an empty database                           Under 2 minutes;           FR-
+     11                                                                           100,000 orders; at least   CFG-03
+                                                                                  500,000 audit rows;
+                                                                                  about 2 tickets per
+                                                                                  order; 97 percent
+                                                                                  completed, plus or
+                                                                                  minus 1 point; refuses a
+                                                                                  non-empty database;
+                                                                                  the same seed gives
+                                                                                  the same total of order
+                                                                                  totals
+
+     DB-         Run the seed on an empty database                                Under 60 seconds; 30       FR-
+     12                                                                           items, 9 users, 4          CFG-
+                                                                                  stations, all              02, BR-
+                                                                                  configuration keys; C6     09
+                                                                                  clean; refuses a non-
+                                                                                  empty database
+
+     DB-         100 sessions call S1 for one business day at                     Values 1 to 100, each      BR-01
+     13          once                                                             once, no gap
+
+     DB-         Timestamps round-trip in UTC; the kf_app                         Equal instants             DR-02,
+     14          session time zone is UTC                                                                    BR-18
+
+     DB-         Run S1 to S3, S5 (including the amount                           Documented results         DBD 8,
+     15          condition), S6 (rush first, then oldest), S7, S8                                            LLD 8.2
+                 and S9 (SKIP LOCKED) against known data
+
+     DB-         Run S10 to S14 on the known report dataset                       Equal to the hand-         FR-
+     16                                                                           computed figures           RPT-01
+                                                                                                             to 05
+
+     DB-         Backup and restore drill: dump, restore to a                     Zero rows and equal        DBD 12
+     17          scratch database, run C1 to C7 and compare                       counts
+                 row counts
+
+
+
+
+                                                                                                                Page 18 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  5.2 Architecture and static checks
+
+     ID             Check                                                         Tool
+
+     AR-01          api packages do not use infrastructure                        ArchUnit
+                    packages
+
+     AR-            domain packages use no web or servlet types                   ArchUnit
+     02
+
+     AR-            The ten feature modules have no dependency                    ArchUnit
+     03             cycles
+
+     AR-            order does not depend on kitchen                              ArchUnit
+     04
+
+     AR-            @Transactional appears only in application                    ArchUnit
+     05             packages
+
+     AR-            EndpointRuleCoverageTest: every controller                    Test over the handler mappings
+     06             mapping has an explicit URL rule, and the public
+                    rules match the endpoint index of the API
+                    document
+
+     AR-            CaseCoverageTest: every row of every case                     Script over the exported
+     07             table in the exported API document has a case                 Markdown
+                    in the YAML files
+
+     AR-            OpenAPI drift: the generated definition equals                Script
+     08             the API document's endpoint index (IDs,
+                    methods, paths, roles, classes)
+
+     AR-            Compatibility: no removed or retyped field                    openapi-diff
+     09             against the last release
+
+     AR-10          No double or float field in domain packages                   ArchUnit
+
+     AR-11          No call to Instant.now() or LocalDate.now()                   ArchUnit
+                    outside ClockConfig
+
+     AR-12          No System.out and no printStackTrace in main                  ArchUnit
+                    code
+
+     AR-13          Formatting and lint rules pass; coverage at least             CI gate
+                    70 percent on service and domain code
+
+
+
+
+                                                                                                             Page 19 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  6. API contract and integration tests
+
+  6.1 Case source and format (CT)
+  Every row of every case table in the API document is one test. Its ID is the endpoint ID
+  plus the row number in that endpoint's case table, counted from 1 in document order: O-
+  01.14 is the fourteenth row of the O-01 table. The cases live in YAML files, one per
+  endpoint, under src/test/resources/cases. A generic runner (a JUnit TestFactory) builds
+  the fixtures, sends each request to the running application with RestAssured, and checks
+  the response and the database. The expected values are copied from the API document; a
+  change to a case table and the matching YAML change in the same commit.
+
+     endpoint: O-01
+     cases:
+         - id: O-01.09
+           title: item unavailable
+             given:
+                 users: [ cashier1 ]
+                 items:
+                   - { name: Cola, price: '69.00', gst: '18.00', stations: [ Beverage ],
+     available: false }
+             request:
+                 as: cashier1
+                 method: POST
+                 path: /orders
+                 body:
+                     orderType: TAKEAWAY
+                     lines: [ { itemId: '$item.Cola', quantity: 1 } ]
+             expect:
+                 status: 422
+                 code: ITEM_UNAVAILABLE
+                 errors: [ { field: 'lines[0].itemId', code: ITEM_UNAVAILABLE } ]
+             post:
+                 orders: 0
+                 stock: unchanged
+                 audit: none
+
+
+  Symbolic references such as $item.Cola, $user.cashier1 and $order.first are resolved by
+  the runner. A row marked n/a in the API tables (a race between two requests) has no
+  YAML case of its own; its entry points to the concurrency case that covers it, for example
+  see: CC-05.
+
+
+
+                                                                                       Page 20 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  For every response the runner also checks:
+
+         Errors: the whole envelope (timestamp, status, code, message, path, correlationId,
+         errors, details); no stack trace or class name in any field; X-Correlation-Id equal to
+         correlationId; Cache-Control no-store; Retry-After on 429 and 503.
+         Successes: the body validates against the generated OpenAPI schema, money fields
+         are strings with two decimals, instants have three millisecond digits, and no
+         undocumented field appears.
+
+
+  6.2 Fixtures and extra assertions by endpoint group
+
+     Group                              Endpoints                   Fixtures                  Assertions beyond status
+                                                                                              and code
+
+     Authentication                     A-01 to A-05                A user per role, one      failed_attempts and
+                                                                    inactive user, the        locked_until in the
+                                                                    MutableClock              database; Retry-After
+                                                                                              seconds; cookie flags
+                                                                                              HttpOnly, Secure,
+                                                                                              SameSite=Strict and path
+                                                                                              /api/v1/auth; no password
+                                                                                              hash in any response or log
+
+     User admin                         U-01 to U-05                Two admins, a kitchen     Refresh tokens revoked on
+                                                                    user with a station       deactivation;
+                                                                                              USER_UPDATED audit;
+                                                                                              SELF_LOCKOUT and
+                                                                                              LAST_ADMIN
+
+     Stations and                       S-01 to S-03,               A station with open       Cache evicted at once;
+     configuration                      C-01, C-02                  tickets; an item whose    CONFIG_CHANGED sent;
+                                                                    only station is the one   audit
+                                                                    being deactivated
+
+     Menu                               M-01 to M-21                Categories, items,        menu_version incremented;
+                                                                    modifier groups with      ETag changes; item version
+                                                                    minimum and               incremented; a failed delete
+                                                                    maximum, an item that     leaves every dependent row
+                                                                    was ordered, a combo      in place
+
+
+
+
+                                                                                                                     Page 21 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Group                              Endpoints                   Fixtures                  Assertions beyond status
+                                                                                              and code
+
+     Inventory                          I-01 to I-03                A tracked item with       Quantity; availability flips at
+                                                                    stock, an untracked       zero; adjustment row and
+                                                                    item                      audit
+
+     Orders                             O-01 to O-08                Menu with SINGLE and      PC-01 to PC-03
+                                                                    MULTIPLE groups, a
+                                                                    tracked item, an
+                                                                    unavailable and an
+                                                                    inactive item, a combo,
+                                                                    orders in every status
+
+     Payments                           P-01 to P-06                Orders in CREATED,        PC-04, PC-13; bill rows sum
+                                                                    IN_KITCHEN and            to the order totals
+                                                                    CANCELLED; items on
+                                                                    one, two and three
+                                                                    stations; a deactivated
+                                                                    station
+
+     Kitchen                            K-01 to K-07                An IN_KITCHEN order       PC-05 to PC-07
+                                                                    with three tickets;
+                                                                    bound and unbound
+                                                                    users; the
+                                                                    MutableClock for the
+                                                                    recall window
+
+     Board                              B-01                        Orders in every status    Only tokens and times;
+                                                                                              nothing personal
+
+     Reports and audit                  R-01 to R-05,               The known report          Figures equal the stored
+                                        AU-01                       dataset; an audit         expected values; range
+                                                                    dataset of 500 rows       limits; bulkhead
+
+     Platform                           H-01 to H-03                A stopped database        Health DOWN with 503; the
+                                                                    container                 docs endpoints follow the
+                                                                                              profile
+
+
+
+  6.3 Post-condition suites (PC)
+  Status codes are not enough: each state-changing operation also has to leave the system
+  in exactly the right state, and a failed operation has to leave nothing behind.
+
+
+
+                                                                                                                        Page 22 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID          Operation                      After success, all of this is true                After any
+                                                                                                  failure,
+                                                                                                  nothing
+                                                                                                  changed
+
+     PC-         O-01 create                    One order row with status CREATED and version     No order, line
+     01          order                          0; token is the previous token of that business   or modifier
+                                                day plus 1 and the order number matches KF-       rows; stock
+                                                yyyyMMdd-NNNN; line and modifier snapshots        and the token
+                                                equal the response; totals satisfy C1; tracked    counter
+                                                stock is reduced by the quantities; exactly one   unchanged
+                                                ORDER_CREATED audit record by the caller;         (the next
+                                                with a key, the idempotency row holds the         order takes
+                                                response and the order id; no stream event is     the token the
+                                                sent                                              failed one
+                                                                                                  would have
+                                                                                                  had); no audit;
+                                                                                                  no
+                                                                                                  idempotency
+                                                                                                  row
+
+     PC-         O-04 edit                      Same id, token, number and business day; lines    Old lines,
+     02          order                          replaced; totals recomputed; stock reflects the   totals, stock
+                                                difference; version plus 1; ORDER_EDITED audit;   and version
+                                                an identical edit changes nothing, not even the   intact
+                                                version
+
+     PC-         O-05 cancel                    Status CANCELLED with reason, canceller and       Order, tickets,
+     03          order                          time set; NEW and IN_PROGRESS tickets             stock, refund
+                                                CANCELLED and DONE tickets untouched;             unchanged
+                                                stock restored only when the order was
+                                                CREATED; REFUND_PENDING refund and
+                                                payment status only when it was paid; token
+                                                gone from the board; ORDER_CANCELLED
+                                                audit; TicketCancelled and OrderStatusChanged
+                                                events after commit
+
+
+
+
+                                                                                                              Page 23 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID          Operation                      After success, all of this is true                After any
+                                                                                                  failure,
+                                                                                                  nothing
+                                                                                                  changed
+
+     PC-         P-01 pay                       Order IN_KITCHEN with paidAt set; one payment     Order still
+     04                                         row whose amount equals the total (and            CREATED at
+                                                changeDue for cash); exactly one ticket per       its old version;
+                                                distinct active station among the items, each     no payment,
+                                                with its own items, targetSeconds equal to the    no tickets, no
+                                                largest on it, rush and business day copied,      audit, no
+                                                status NEW; audit PAYMENT_RECORDED,               events
+                                                ORDER_PAID and ORDER_IN_KITCHEN;
+                                                TicketCreated per ticket and
+                                                OrderStatusChanged after commit; the board
+                                                lists the token as preparing
+
+     PC-         K-03 start                     Ticket IN_PROGRESS, startedAt set, version plus   Ticket
+     05                                         1, TICKET_STARTED audit, TicketChanged event      unchanged
+
+     PC-         K-04 bump                      Ticket DONE with doneAt; when it was the last     Ticket and
+     06                                         open ticket the order is READY with readyAt,      order
+                                                ORDER_READY is audited exactly once in the        unchanged
+                                                order's life and the board shows the token as
+                                                ready; otherwise the order stays IN_KITCHEN
+
+     PC-         K-05 recall                    Ticket IN_PROGRESS with doneAt cleared and        Ticket and
+     07                                         recallCount plus 1; a READY order returns to      order
+                                                IN_KITCHEN with readyAt cleared and the token     unchanged
+                                                back in preparing; TICKET_RECALLED audit
+
+     PC-         M-17                           Item availability and version changed;            Unchanged
+     08          availability                   menu_version plus 1;
+                                                ITEM_AVAILABILITY_CHANGED audit; the next
+                                                GET /menu shows the new state with a new ETag.
+                                                A request that changes nothing leaves version,
+                                                menu_version and audit untouched
+
+     PC-         I-02 stock                     Quantity plus delta; adjustment row with actor    Unchanged
+     09          adjustment                     and reason; STOCK_ADJUSTED audit; availability
+                                                flips when the quantity crosses zero
+
+
+
+
+                                                                                                              Page 24 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID          Operation                      After success, all of this is true                        After any
+                                                                                                          failure,
+                                                                                                          nothing
+                                                                                                          changed
+
+     PC-         Admin                          One audit record per change with the actor;               A failed
+     10          catalogue                      menu_version plus 1 for menu changes and the              change,
+                 changes (M-03                  menu cache evicted; a delete removes the item             including a
+                 to M-16, M-19                  and all its dependent rows                                delete refused
+                 to M-21, S-02,                                                                           by a foreign
+                 S-03)                                                                                    key, leaves
+                                                                                                          every row in
+                                                                                                          place
+
+     PC-         User changes                   The password is stored only as a BCrypt hash;             Unchanged
+     11          (U-02, U-04, U-                refresh tokens revoked where specified; audit
+                 05, A-05)                      rows
+
+     PC-         C-02                           All keys applied; cache evicted;                          None applied
+     12          configuration                  CONFIG_CHANGED sent; audited once
+
+     PC-         P-06 refund                    Refund and payment both REFUNDED in one                   Both
+     13          completion                     transaction                                               unchanged
+
+     PC-         The unpaid-                    CREATED orders older than the timeout become              Not applicable
+     14          timeout job                    CANCELLED with UNPAID_TIMEOUT, actor
+                                                SYSTEM, stock restored, audit written; paid
+                                                orders untouched; an order locked by an in-flight
+                                                payment is skipped
+
+
+
+  6.4 Role matrix (RM)
+
+     ID             Case                                                          Expected
+
+     RM-            Every endpoint of API section 4 called                        Anonymous gets 401 except on public
+     01             with a valid request as anonymous,                            endpoints; allowed roles never get 401
+                    CASHIER, KITCHEN, MANAGER and                                 or 403; every other role gets 403. The
+                    ADMIN (73 x 5 combinations)                                   expected table is written by hand from
+                                                                                  the API index, not generated from the
+                                                                                  security configuration
+
+
+
+
+                                                                                                                      Page 25 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID             Case                                                            Expected
+
+     RM-            Station binding: a Kitchen user bound to                        Fry user: K-01 and X-01 for Fry succeed,
+     02             Fry; multi1 bound to Fry and Grill; a                           for Grill 403; a Grill ticket on K-02 to K-
+                    Manager                                                         06 gives 403 after the lookup. multi1: Fry
+                                                                                    and Grill succeed, Assembly 403.
+                                                                                    Manager: all stations succeed
+
+     RM-            State-dependent role: cancel an                                 Cashier 403; Manager 200. Cashier
+     03             IN_KITCHEN order                                                cancelling a CREATED order: 200
+
+     RM-            Token faults: expired, wrong signature,                         401 each, in the standard envelope
+     04             algorithm none, no role claim, unknown
+                    role value, wrong key
+
+     RM-            A user deactivated while holding a valid                        The token still works until it expires;
+     05             token                                                           refresh and login fail at once; the user's
+                                                                                    stream ends at expiry
+
+
+
+  6.5 Web-layer tests (WS)
+
+     ID             Case                                                          Expected
+
+     WS-            One test for every row of the                                 The documented status, code and field
+     01             exception table and the constraint                            code, always in the envelope
+                    table in LLD 3.3, using real violations
+                    where possible (duplicate station
+                    name, delete a used item, second
+                    payment)
+
+     WS-            Strict JSON: an unknown property; a                           400 MALFORMED_REQUEST each,
+     02             number where a string is expected;                            naming the offender where there is one
+                    the string 2 where a number is                                (duplicate detection needs the Jackson
+                    expected; 2.5 for a quantity; null for a                      option in change 15)
+                    primitive; duplicate property names;
+                    trailing text
+
+     WS-            Unknown query parameter on every                              400; 422 INVALID_FORMAT; 200
+     03             GET endpoint; an empty filter value; a
+                    valid filter
+
+
+
+
+                                                                                                                          Page 26 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID             Case                                                          Expected
+
+     WS-            Wrong Content-Type; Accept of                                 415; 406; 405 with Allow; same headers
+     04             application/xml; DELETE on /orders;                           with no body; the allowed methods and
+                    HEAD on a GET endpoint; a CORS                                headers
+                    preflight
+
+     WS-            Correlation id: a valid client value; a                       Valid one echoed; invalid ones replaced by
+     05             value with a space, 65 characters, or a                       a UUID; the header present on every
+                    newline                                                       response, including 401, 413 and 429
+                                                                                  produced by filters
+
+     WS-            A body of 1 MB plus one byte, with                            413 PAYLOAD_TOO_LARGE
+     06             Content-Length and chunked
+
+     WS-            Pagination on every list endpoint:                            20 per page; 200; 422; 422; 422
+     07             defaults; size 100; size 101; page minus                      UNKNOWN_SORT_FIELD; 422
+                    1; unknown sort field; bad direction;                         INVALID_ENUM; 200 empty; 400; 400
+                    page beyond the last; cursor together
+                    with page; a tampered cursor
+
+     WS-            Caching headers                                               no-store on authenticated responses; on
+     08                                                                           /menu an ETag, 304 for a matching If-
+                                                                                  None-Match and a changed ETag after a
+                                                                                  change
+
+     WS-            Strings: padded with spaces; blank;                           Trimmed; REQUIRED;
+     09             with a control character                                      INVALID_CHARACTERS
+
+     WS-            Formats in every success body                                 Money strings with two decimals; instants
+     10                                                                           with milliseconds and Z; no null where a
+                                                                                  value is documented
+
+
+
+  6.6 Idempotency and version contract (CT-ID, CT-VER)
+
+     ID                 Case                                                      Expected
+
+     CT-ID-01           Same key and payload sent twice                           Second response is the first one, with
+                                                                                  Idempotency-Replayed true; one order
+
+     CT-ID-             Same key, different payload                               422 IDEMPOTENCY_KEY_REUSED with
+     02                                                                           details.firstSeenAt; nothing created
+
+
+
+
+                                                                                                                       Page 27 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID                 Case                                                      Expected
+
+     CT-ID-             Malformed key (81 characters; a                           422 INVALID_FORMAT on the header
+     03                 space)
+
+     CT-ID-             Replay after the order was paid                           The original snapshot (status CREATED),
+     04                                                                           not the current state
+
+     CT-ID-             Another user sends the same key                           An independent order
+     05
+
+     CT-ID-             No key, same body twice                                   Two orders
+     06
+
+     CT-ID-             Same key after 24 hours (clock                            A new order
+     07                 advanced, purge job run)
+
+     CT-ID-             First attempt fails with 422, second                      201: nothing was stored by the failure
+     08                 attempt with the same key and a
+                        corrected body
+
+     CT-                A stale expectedVersion on every                          409 STALE_VERSION with details.current
+     VER-01             endpoint that takes one                                   equal to the current representation
+
+     CT-                Repeat start, bump, cancel,                               409 INVALID_TRANSITION whose
+     VER-02             complete and refund completion                            details.currentStatus already equals the
+                                                                                  target state
+
+
+
+
+  7. Concurrency and mutation tests
+  These tests are the heart of the project: they prove the claims of SAD section 6 about
+  duplicates, overselling and stuck orders. Rules for all of them:
+
+          A shared helper releases the threads together with a latch (LLD 6.2). Each thread
+          uses its own user so the per-user rate limits (30 order writes a minute) do not
+          interfere; the test profile also raises the limits.
+          Every case runs 50 times in the nightly build and 5 times on each commit. The failure
+          budget is zero: a single failure in 50 is a defect.
+          Waiting uses Awaitility with a 30-second timeout and never sleeps.
+          After each case the consistency queries C1 to C7 must return zero rows.
+          A mutation variant (marked m) removes one protection through a seam or a scratch
+          schema and must make its test fail, which proves the test can see the bug.
+
+
+
+                                                                                                                           Page 28 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID          Given                              When                          Then                                    Proves
+
+     CC-         A valid order and                  50 threads POST               One order row; all 50 responses are     NFR-CONC-
+     01          one Idempotency-                   /orders with the              201 with the same body; 49 carry        01, AT-03, BR-
+                 Key                                same key and                  Idempotency-Replayed true; one          15
+                                                    body                          ORDER_CREATED audit; the token
+                                                                                  counter moved by 1
+
+     CC-         The same, with the                 The same                      More than one order exists in every     The test
+     01m         insert-first step                                                repeat                                  detects a
+                 replaced by check-                                                                                       broken
+                 then-insert and a                                                                                        idempotency
+                 barrier between the
+                 two
+
+     CC-         A tracked item with                100 threads each              Exactly 10 get 201 and 90 get 409       NFR-CONC-
+     02          stock 10                           order one unit                OUT_OF_STOCK; stock is 0 and the        02, AT-04, BR-
+                                                                                  item is unavailable; a sampler          12
+                                                                                  reading the stock every 5 ms never
+                                                                                  sees a value below 0
+
+     CC-         The conditional                    The same                      More than 10 orders succeed in at       The test
+     02m         UPDATE replaced by                                               least one repeat, or the CHECK          detects
+                 read, check, write                                               constraint fires                        overselling
+
+     CC-         An IN_PROGRESS                     Two users bump it             Exactly one 200; the other 409          NFR-CONC-
+     03          ticket at version v                at once with                  (STALE_VERSION, or                      03, AT-05, FR-
+                                                    expectedVersion               INVALID_TRANSITION when it saw          KDS-07
+                                                    v; and the same               the new state); the ticket is DONE
+                                                    with start on a               once with one TICKET_BUMPED
+                                                    NEW ticket                    audit
+
+     CC-         An IN_KITCHEN                      Both are bumped               Both return 200; exactly one            NFR-CONC-
+     04          order whose last                   at once                       response has becameReady true;          04, AT-06, BR-
+                 two tickets are                                                  the order is READY;                     06
+                 IN_PROGRESS at                                                   ORDER_READY is audited once;
+                 different stations                                               the board shows the token as
+                                                                                  ready. A variant with 3 tickets and 3
+                                                                                  threads gives the same
+
+     CC-         The order lock                     The same                      The order is left IN_KITCHEN in         The test
+     04m         replaced by a no-op,                                             every repeat (stuck), which is the      detects the
+                 and a barrier that                                               bug that the lock prevents              lost READY
+                 holds each
+                 transaction until
+                 both have updated
+                 their ticket
+
+
+
+
+                                                                                                                                   Page 29 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID          Given                              When                          Then                                    Proves
+
+     CC-         A CREATED order                    20 threads pay it             One 201; 19 get 409                     FR-PAY-03
+     05                                             at once                       PAYMENT_ALREADY_RECORDED;
+                                                                                  one payment row; one ticket per
+                                                                                  station, created once; ORDER_PAID
+                                                                                  audited once
+
+     CC-         The compare-and-                   The same                      More than one payment row               The test
+     05m         set replaced by                                                  appears                                 detects a
+                 read-check-write,                                                                                        double
+                 and                                                                                                      payment
+                 uq_payment_order
+                 dropped in a scratch
+                 schema
+
+     CC-         A CREATED order,                   Pay and cancel                In each round exactly one wins; the     BR-05, SAD
+     06          100 rounds                         start together in             final state is either IN_KITCHEN        6.2
+                                                    each round                    with a payment and tickets, or
+                                                                                  CANCELLED with stock restored
+                                                                                  and neither; never both
+
+     CC-         A CREATED order,                   An edit and a                 Either the edit wins and the            FR-ORD-06,
+     07          100 rounds                         payment (with the             payment gets 422                        FR-PAY-04
+                                                    old amount) start             AMOUNT_MISMATCH, or the
+                                                    together                      payment wins and the edit gets
+                                                                                  409; the stored payment amount
+                                                                                  always equals the order total
+
+     CC-         An empty business                  20 users create 10            Tokens are exactly 1 to 200 with no     BR-01
+     08          day                                orders each,                  gap and no repeat; order numbers
+                                                    together                      are unique; C7 is clean
+
+     CC-         An unpaid order                    The cancel job and            Either the payment wins and the         FR-ORD-12
+     09          older than the                     a payment start               job skips the row, or the job wins
+                 timeout, 50 rounds                 together                      and the payment gets 409 with
+                                                                                  stock restored; never a paid and
+                                                                                  cancelled order
+
+     CC-         Two transactions                   They run through              Both succeed within 2 retries and       SAD 6.5
+     10          forced into a                      DeadlockRetry                 kf_db_lock_retry_total rises; a third
+                 deadlock by a test                                               consecutive deadlock gives 503
+                 hook                                                             SERVICE_BUSY. Separately, a
+                                                                                  session holding the order row for 3
+                                                                                  seconds makes a bump return 503
+                                                                                  SERVICE_BUSY at about 2 seconds
+                                                                                  with no retry
+
+
+
+
+                                                                                                                                    Page 30 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID          Given                              When                          Then                                   Proves
+
+     CC-         Three tracked items                50 orders request             No deadlock (retry counter 0);         Ascending
+     10b                                            them in different             every order succeeds or gets           lock order,
+                                                    line orders at once           OUT_OF_STOCK                           SAD 6.1
+
+     CC-         An item and 50                     The item is made              Each order either committed with       BR-04, FR-
+     11          creates in flight                  unavailable during            the item before the change or was      MENU-04
+                                                    the run                       rejected with ITEM_UNAVAILABLE;
+                                                                                  no order created after the change
+                                                                                  contains it
+
+     CC-         Two active admins                  Each deactivates              One succeeds; the other gets 422       FR-AUTH-05
+     12                                             the other at once,            LAST_ADMIN; at least one admin
+                                                    20 rounds                     stays active
+
+     CC-         One refresh cookie                 Two threads                   One 200 and one 401 without            FR-AUTH-07
+     13                                             refresh at once;              revoking; the later attempt gets 401
+                                                    then a third                  and revokes the family, so the new
+                                                    attempt 11                    token fails too
+                                                    seconds later
+                                                    (clock advanced)
+
+     CC-         One user                           10 wrong-                     The user ends locked;                  FR-AUTH-06
+     14                                             password logins at            failed_attempts equals the number
+                                                    once                          of 401 responses, with no lost
+                                                                                  update; the rest are 429
+
+     CC-         A tracked item                     Creates and                   At the end initial stock equals the    BR-12
+     15                                             cancels (while                quantity plus the units on live
+                                                    CREATED) run                  orders; the quantity never exceeds
+                                                    together                      the initial stock
+
+
+
+
+  8. Stream tests
+  Stream tests use a real HTTP client that reads the event stream, with the heartbeat
+  interval set to 200 ms and token lifetime to 2 seconds in the test profile. Client-side
+  behaviours are tested in JavaScript with Vitest.
+
+
+
+
+                                                                                                                                  Page 31 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID           Case                                                      Expected                              Proves
+
+     SS-          A bound Kitchen user                                      200 with Content-Type text/event-     FR-KDS-05,
+     01           connects to X-01                                          stream, Cache-Control no-cache        API 12
+                                                                            and X-Accel-Buffering no; the first
+                                                                            event is hello with serverTime,
+                                                                            stream, heartbeatSeconds and
+                                                                            expiresAt equal to the token expiry
+
+     SS-          10 open streams on 5 stations;                            Every payment produces                NFR-PERF-
+     02           100 orders paid one after                                 TICKET_CREATED on each                02
+                  another                                                   involved station within 1 second
+                                                                            (the p95 over the run is checked
+                                                                            again in PF-02)
+
+     SS-          A stream left idle                                        A comment line arrives every          SAD 9.4
+     03                                                                     heartbeat interval; the stream
+                                                                            stays open for 3 intervals
+
+     SS-          A station stream is open; the                             Within 3 seconds the screen state     AT-09, FR-
+     04           client is dropped; 3 orders are                           equals the live queue, in the order   KDS-05
+                  paid; the client reconnects and                           of BR-10, with no duplicate
+                  fetches the snapshot
+
+     SS-          Events for one ticket delivered                           The final state equals the snapshot   API 12.2
+     05           shuffled and duplicated into                              (a property test over many random     rule 2
+                  the client merge function                                 orderings)
+
+     SS-          A consumer that reads                                     The server closes that stream; the    SAD 9.4
+     06           nothing; 150 events published                             overflow counter becomes 1; other
+                                                                            subscribers are unaffected; a
+                                                                            reconnect works
+
+     SS-          Token life of 2 seconds                                   STREAM_CLOSING with reason            SAD 9.6
+     07                                                                     TOKEN_EXPIRED, then the stream
+                                                                            closes within 1 second of expiry; a
+                                                                            reconnect with a fresh token works
+
+     SS-          The 4th stream of one user; the                           429 RATE_LIMITED with rateClass       SAD 5.2
+     08           21st from one address; the 51st                           CONNECTION_CAP each time;
+                  overall                                                   closing a stream frees a slot
+
+
+
+
+                                                                                                                           Page 32 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID           Case                                                      Expected                              Proves
+
+     SS-          Tickets for Grill and Fry;                                Fry never receives a Grill event;     FR-AUTH-
+     09           streams for Fry, Grill and                                Manager receives both                 04
+                  Manager
+
+     SS-          Unbound Kitchen user; expired                             403; 401 before any stream starts;    RM-02
+     10           token; unknown station;                                   404; 406
+                  Accept of application/json
+
+     SS-          A payment transaction forced                              The rolled-back one publishes         SAD P4
+     11           to roll back; a committed one                             nothing; the committed one
+                                                                            publishes exactly once per ticket
+
+     SS-          The application is stopped                                SNAPSHOT_REQUIRED with                SAD 11.2
+     12           gracefully during an open                                 reason SERVER_SHUTDOWN, then
+                  stream                                                    close; an in-flight request still
+                                                                            completes within the 20-second
+                                                                            grace period
+
+     SS-          The event executor blocked                                SNAPSHOT_REQUIRED with                LLD 3.11
+     13           and its queue filled                                      reason OVERLOAD reaches every
+                                                                            subscriber, so no event is lost
+                                                                            silently
+
+     SS-          The public board stream with                              BOARD_CHANGED on READY,               FR-BRD-01
+     14           no token                                                  recall, complete and cancel; the      to 04
+                                                                            payload holds only tokens and
+                                                                            times; the polling endpoint returns
+                                                                            the same state
+
+     SS-          A real Nginx container in front                           Events arrive within 1 second (no     SAD 9.7
+     15                                                                     buffering); a stream stays open for
+                                                                            90 seconds, beyond the default
+                                                                            proxy timeouts; no compression on
+                                                                            streams
+
+     SS-          The manager stream                                        LATE_TICKET once per ticket when      FR-KDS-09
+     16                                                                     it crosses its red threshold;
+                                                                            ORDER_CHANGED on status
+                                                                            changes; CONFIG_CHANGED on
+                                                                            configuration
+
+
+
+
+                                                                                                                           Page 33 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID           Case                                                      Expected                                    Proves
+
+     SS-          Client reconnect logic (Vitest)                           Delays 1, 2, 4, 8, then 15 seconds at       API 12.2
+     17                                                                     most, each with jitter                      rule 4
+
+     SS-          Client dead-connection                                    No heartbeat for 40 seconds                 API 12.2
+     18           detection (Vitest)                                        triggers a reconnect                        rule 3
+
+     SS-          Client fallback (Vitest)                                  While the stream is down a station          API 12.2
+     19                                                                     polls its snapshot every 2 seconds          rule 6
+                                                                            and the board every 3
+
+
+
+
+  9. Rate-limit and cache tests
+
+  9.1 Rate limiting (RL)
+  Buckets take an injected time meter, so refill is tested instantly. Limits are the defaults of
+  API 2.10 unless a case says otherwise.
+
+
+     ID           Case                                                Expected                                      Proves
+
+     RL-          For each class (LOGIN,                              The burst all pass; the next gets             SAD 5.2, API
+     01           REFRESH, ORDER_WRITE,                               429 RATE_LIMITED with                         2.10
+                  TICKET_ACTION, READ,                                details.rateClass and Retry-After
+                  REPORT, ADMIN_WRITE,                                of at least 1; after the refill the
+                  BOARD_READ,                                         burst passes again. X-RateLimit-
+                  SSE_CONNECT): with time                             Limit equals the capacity and X-
+                  frozen, send as many                                RateLimit-Remaining falls by one
+                  requests as the burst; send                         per call
+                  one more; advance by one
+                  refill period
+
+     RL-          User A exhausts                                     User B is unaffected; A can still use         Per-user, per-
+     02           ORDER_WRITE                                         TICKET_ACTION and READ                        class keys
+                                                                      (classes are independent)
+
+     RL-          ORDER_WRITE exhausted                               Retry-After equals the seconds                LLD 3.7
+     03           (30 per minute)                                     until the next token, rounded up, at
+                                                                      least 1
+
+
+
+
+                                                                                                                                 Page 34 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID           Case                                                Expected                                Proves
+
+     RL-          Five wrong passwords, then                          The fifth is 401; the sixth is 429      FR-AUTH-06
+     04           the correct one; then 15                            with Retry-After of about 900
+                  minutes later (clock) the                           seconds; later 200; a successful
+                  correct one                                         login resets the counter
+
+     RL-          Six attempts with an                                Both give 429 with the same             SC-22
+     05           unknown username, and six                           envelope shape and headers:
+                  with a known user locked                            lockout reveals no usernames
+                  out
+
+     RL-          The same username from                              The bucket is keyed on both, so the     LLD 3.7
+     06           another address; a different                        second pair is not blocked by the
+                  username from the same                              first; the database lockout still
+                  address                                             applies to the real user
+
+     RL-          The bucket store throws an                          Normal requests succeed, an             SAD 5.2, P5
+     07           unexpected error                                    ERROR is logged and
+                                                                      kf_rate_limiter_errors_total rises; a
+                                                                      login attempt fails closed with 503
+                                                                      SERVICE_BUSY
+
+     RL-          1,000 health calls; static                          None is limited                         SAD 5.2
+     08           files; stream heartbeats
+
+     RL-          20,000 requests with                                The bucket cache never exceeds          LLD 3.7
+     09           distinct keys; then 10 idle                         10,000 entries; idle entries expire
+                  minutes (clock)
+
+     RL-          A request from outside the                          The header is ignored in the first      SAD 5.2
+     10           trusted proxy carrying X-                           case and honoured in the second,
+                  Forwarded-For; the same                             so a client cannot forge its address
+                  from the Nginx container
+
+     RL-          k6 at the design workload                           Zero 429 responses                      NFR-SEC-06
+     11           (150 orders an hour with the                                                                (proposed)
+                  screens' normal reads) for
+                  10 minutes, with real per-
+                  user limits
+
+
+
+
+                                                                                                                        Page 35 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID           Case                                                Expected                                          Proves
+
+     RL-          Three boards behind one                             Every 2 seconds: 429 appears                      API 2.10
+     12           address polling every 2                             within a minute; every 3 seconds:
+                  seconds, then every 3                               no 429 over 2 minutes
+                  seconds
+
+     RL-          41 requests to /api from one                        The surplus gets 429 from Nginx                   SAD 5.2 edge
+     13           address within a second,                            with a JSON body that carries                     layer
+                  through real Nginx                                  code RATE_LIMITED
+
+     RL-          The sixth login request                             Blocked at the edge                               SAD 5.2 edge
+     14           within a minute from one                                                                              layer
+                  address, through real Nginx
+
+
+
+  9.2 Caching (CA)
+
+     ID           Case                                                            Expected                               Proves
+
+     CA-          Two GET /menu with the same                                     The loader runs once for the           SAD 5.3
+     01           filter; a different filter; more than                           first pair; a different filter is a
+                  64 distinct filters                                             separate entry; the cache
+                                                                                  never holds more than 64
+                                                                                  entries
+
+     CA-          Change an item through the API;                                 The next GET /menu shows the           FR-MENU-04,
+     02           then another change that is                                     change with a new ETag within          FR-INV-03
+                  rolled back                                                     1 second; the rolled-back
+                                                                                  change neither evicts nor
+                                                                                  changes the ETag
+
+     CA-          The loader is held after reading                                The next GET /menu returns             SAD 5.3 race
+     03           old data; a change commits and                                  the new data: no stale entry           rule
+                  eviction is requested; the loader                               survives (50 repeats)
+                  is released
+
+     CA-          If-None-Match equal to the                                      304 with no body; 200; a               API 2.9
+     04           current ETag; a different value; a                              different ETag
+                  different filter
+
+
+
+
+                                                                                                                                   Page 36 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID           Case                                                            Expected                          Proves
+
+     CA-          Change recall_window_seconds,                                   The recall uses the new value     FR-CFG-01
+     05           then recall                                                     at once. With eviction disabled
+                                                                                  (mutation) the new value
+                                                                                  appears only after the 60-
+                                                                                  second backstop
+
+     CA-          100 board requests in one                                       One database query; a change      LLD 3.8
+     06           second                                                          appears within 1 second
+
+     CA-          Warm the menu cache; change a                                   The order is priced at the new    SAD P1
+     07           price directly in SQL, bypassing                                database price while GET
+                  eviction; create an order                                       /menu still shows the old one:
+                                                                                  the database decides, the
+                                                                                  cache only displays
+
+     CA-          Warm the cache with an item                                     422 ITEM_UNAVAILABLE              BR-04
+     08           available; mark it unavailable                                  although the cache says
+                  directly in SQL; create an order                                available
+
+     CA-          Advance the cache ticker by 5                                   The menu entry is reloaded        SAD 5.3
+     09           minutes                                                                                           backstop
+
+     CA-          The cache throws on load                                        GET /menu still returns 200,      SAD 11.4
+     10                                                                           loaded straight from the
+                                                                                  database
+
+     CA-          100 menu requests after warm-                                   Hit ratio above 95 percent in     SAD 5.3
+     11           up                                                              the exported metrics
+
+
+
+
+  10. Security tests (SC)
+
+     ID            Case                                                                 Expected
+
+     SC-           A token with the role claim edited but                               401 for each
+     01            not re-signed; algorithm none; another
+                   signing key; expired; no expiry
+
+     SC-           Station binding and state-dependent                                  As RM-02 and RM-03
+     02            roles
+
+
+
+
+                                                                                                                               Page 37 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID            Case                                                           Expected
+
+     SC-           Price, total, status, role, active or                          400 MALFORMED_REQUEST (unknown
+     03            password hash sent in a create or                              property)
+                   patch body
+
+     SC-           SQL metacharacters (a quote followed                           Stored or matched as plain text; no SQL
+     04            by OR 1=1, a comment marker) in note,                          error; no table touched
+                   search q, username, reference and
+                   audit action
+
+     SC-           A JSON document nested 5,000 levels                            400, no stack overflow
+     05            deep
+
+     SC-           A form-encoded body to a JSON                                  415
+     06            endpoint
+
+     SC-           CORS: an allowed origin; another                               Allowed origin gets the exact origin back
+     07            origin; credentials                                            (never a wildcard with credentials);
+                                                                                  another origin gets no CORS headers;
+                                                                                  credentials only on the auth endpoints
+
+     SC-           Security headers on API and static                             Content-Security-Policy with default-src
+     08            responses                                                      'self', X-Content-Type-Options nosniff,
+                                                                                  Referrer-Policy no-referrer, frame-
+                                                                                  ancestors none; HSTS on the HTTPS
+                                                                                  profile
+
+     SC-           Capture the logs through login,                                No password, token, Authorization
+     09            refresh, a failed login and a password                         header or refresh cookie appears
+                   change
+
+     SC-           Force an unexpected exception and a                            The body is the generic envelope: no class
+     10            database constraint failure                                    name, SQL text or stack trace
+
+     SC-11         200 logins for an unknown user and                             Median response times within 25 percent
+                   200 with a wrong password for a                                of each other (a statistical check, run
+                   known user                                                     nightly)
+
+     SC-           Refresh cookie attributes                                      HttpOnly, Secure, SameSite=Strict, path
+     12                                                                           /api/v1/auth, Max-Age of 8 hours
+
+     SC-           Refresh with a foreign Origin, and with                        403 each
+     13            no Origin
+
+
+
+
+                                                                                                                        Page 38 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID            Case                                                           Expected
+
+     SC-           Try to change or delete audit rows                             No endpoint exists; the database refuses
+     14            through the API and through SQL as                             (DB-06, DB-07)
+                   kf_app
+
+     SC-           Secret scanner over the repository,                            Clean on the main branch; the scratch
+     15            and a deliberate fake key committed                            branch fails the build
+                   on a scratch branch
+
+     SC-           Dependency vulnerability scan                                  No High or Critical finding, or each
+     16                                                                           exception documented
+
+     SC-           Add a controller method with no URL                            AR-06 fails the build (deny by default
+     17            rule on a scratch branch                                       holds)
+
+     SC-           Brute-force login                                              RL-04 and RL-05
+     18
+
+     SC-           A note containing a script tag                                 Returned unchanged as a JSON string
+     19                                                                           with nosniff; rendered as plain text on the
+                                                                                  station and manager screens (Playwright)
+
+     SC-           A request with only the refresh cookie                         401 on bearer endpoints
+     20            and no Authorization
+
+     SC-           A username or correlation id                                   Never written raw into a log line
+     21            containing a newline
+
+     SC-           Login, lockout and refresh failures for                        Identical messages and envelopes
+     22            existing and non-existing users
+
+     SC-           Stored password hash                                           BCrypt with cost 12; verification takes
+     23                                                                           between 100 and 600 ms on the reference
+                                                                                  machine
+
+     SC-           Access token lifetime                                          exp minus iat equals 900 seconds
+     24
+
+     SC-           A user demoted after login                                     The new token carries the new role; the
+     25                                                                           old token keeps the old role until it
+                                                                                  expires (documented behaviour)
+
+
+
+
+                                                                                                                           Page 39 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  11. Resilience and fault tests (RS)
+
+     ID           Fault                                                  Expected                               Proves
+
+     RS-          Ticket creation fails after the                        500 INTERNAL_ERROR; the order          AT-11, FR-PAY-
+     01           payment row is inserted (a                             is still CREATED at its old version;   02, NFR-REL-
+                  failing TicketGateway)                                 no payment, no tickets, no audit,      01
+                                                                         no events; after the fault is
+                                                                         removed the retry succeeds
+
+     RS-          The audit insert fails during                          Each business change is rolled         FR-AUD-04
+     02           create, pay, bump and cancel                           back completely
+
+     RS-          The database is stopped,                               Readiness is DOWN and /health          SAD 11.1
+     03           then restarted                                         returns 503; API calls return 503
+                                                                         SERVICE_BUSY with Retry-After
+                                                                         within about 2 seconds; open
+                                                                         streams keep their heartbeat;
+                                                                         within 30 seconds of the restart
+                                                                         the service recovers without
+                                                                         restarting the application
+
+     RS-          All 20 pool connections held                           The next request returns 503           SAD 5.4
+     04           by the test                                            SERVICE_BUSY with reason
+                                                                         POOL after about 2 seconds;
+                                                                         normal service resumes when
+                                                                         they are released
+
+     RS-          Another session holds the                              A bump returns 503                     SAD 6.5
+     05           order row for 3 seconds                                SERVICE_BUSY with reason
+                                                                         LOCK_TIMEOUT at about 2
+                                                                         seconds, and is not retried
+
+     RS-          A statement made to run too                            503 SERVICE_BUSY with reason           SAD 5.4
+     06           long: 11 seconds in a report, 6                        QUERY_TIMEOUT in both
+                  seconds in a normal call
+
+     RS-          The application is killed while                        Committed orders are intact; no        NFR-REL-02
+     07           20 orders a second are being                           partial rows; C1 to C7 clean;
+                  created, then restarted                                screens reconnect and match the
+                                                                         snapshot within 3 seconds of the
+                                                                         restart
+
+
+
+
+                                                                                                                           Page 40 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID           Fault                                                  Expected                              Proves
+
+     RS-          Graceful stop with                                     All of them complete; none is half-   SAD 11.2
+     08           transactions in flight                                 done; streams receive
+                                                                         SNAPSHOT_REQUIRED
+
+     RS-          The event executor is                                  OVERLOAD resynchronisation            SS-13
+     09           saturated                                              reaches every subscriber
+
+     RS-          The rate limiter breaks                                Fail open, except login               RL-07
+     10
+
+     RS-          The cache breaks                                       Database fallback                     CA-10
+     11
+
+     RS-          A scheduled job throws                                 The error is logged and the next      LLD 3.13
+     12                                                                  run still happens
+
+     RS-          Client clock 10 minutes fast                           Station timers and colours equal      API 15.4
+     13           and 10 minutes slow                                    those of a correct clock, because
+                                                                         they use server timestamps (UI
+                                                                         test with a mocked Date)
+
+     RS-          Duplicate and reordered                                Harmless                              SS-05
+     14           stream events
+
+     RS-          A deliberately broken                                  The application exits at start-up     NFR-REL-03
+     15           migration in a copy of V1                              with a non-zero code; readiness
+                                                                         never turns UP; the database is
+                                                                         unchanged
+
+     RS-          PostgreSQL restarted while                             The pool reconnects; the first        SAD 11.1
+     16           the application runs                                   requests may return 503; the
+                                                                         application recovers without a
+                                                                         restart
+
+     RS-          1,000 stream connect-and-                              The open-stream gauge returns to      SAD 9.4
+     17           drop cycles, including                                 0 and the thread count returns to
+                  sockets reset in the middle                            its starting value
+                  of an event
+
+
+
+
+                                                                                                                          Page 41 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  12. Performance and load tests (PF)
+
+  12.1 Method
+  Performance runs use the reference machine (4 cores, 8 GB, application and database on
+  it), the loadtest profile (raised per-user limits, production timeouts and pool) and the
+  100,000-order dataset. Each scenario warms up for 60 seconds, measures for 2 minutes at
+  steady load, and is run 3 times; the median run is reported. k6 provides client-side
+  numbers; Micrometer and pg_stat_statements provide server-side numbers. Results are
+  saved, and a regression of more than 20 percent against the previous run is investigated
+  before release.
+
+
+  12.2 Scenarios
+
+     ID          Scenario                 Load                                    Pass criteria                   Source
+
+     PF-         Order                    50 concurrent users                     Creation p95 under 300 ms;      NFR-
+     01          creation                 create orders of 1 to 3                 failures under 0.1 percent;     PERF-01
+                                          lines from untracked                    pending pool connections stay
+                                          items, each with a                      at 0
+                                          unique Idempotency-
+                                          Key
+
+     PF-         Kitchen                  10 open streams; 5                      Event delivery p95 at most 1    NFR-
+     02          push                     payments a second                       second; every ticket event      PERF-02
+                 latency                  for 2 minutes (600                      received exactly once per
+                                          payments)                               interested stream
+
+     PF-         Order lists              20 users run random                     p95 under 300 ms                NFR-
+     03          and search               filters (status, day,                                                   PERF-03
+                                          token, order
+                                          number), pages of
+                                          20, plus cursor mode
+
+     PF-         Reports                  One request at a                        Each p95 under 2 seconds        NFR-
+     04                                   time over a 31-day                                                      PERF-04
+                                          range: sales, top
+                                          items, prep times,
+                                          hourly
+
+
+
+
+                                                                                                                       Page 42 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID          Scenario                 Load                                    Pass criteria                      Source
+
+     PF-         Audit                    20 users search by                      p95 under 300 ms                   FR-AUD-
+     05          search                   entity and by date                                                         03
+                                          over 500,000 rows
+
+     PF-         Design-                  150 orders an hour,                     Zero errors; heap, thread count    SRS 2.5
+     06          peak soak                normal reads, 7                         and open-stream gauge flat
+                                          streams, for 4 hours                    after warm-up (within 10
+                                                                                  percent); creation p95 under
+                                                                                  150 ms
+
+     PF-         Stress                   Ramp from 50 to 300                     Latency rises but the only         SAD 5.4
+     07                                   users over 10 minutes                   errors are 429 and 503
+                                          creating orders                         SERVICE_BUSY: no 500 and no
+                                                                                  crash; the service recovers
+                                                                                  within 30 seconds after the
+                                                                                  load stops; C1 to C7 clean
+
+     PF-         Spike                    100 orders in 10                        All succeed; tokens unique; p95    SAD 2.3
+     08                                   seconds from 20                         under 500 ms
+                                          users
+
+     PF-         Report                   During PF-01, five                      At most 2 run at once; the         SAD 5.4
+     09          bulkhead                 concurrent report                       others get 429 with rateClass
+                                          requests repeatedly                     REPORT_CONCURRENCY;
+                                                                                  order creation p95 rises by at
+                                                                                  most 10 percent
+
+     PF-         Pool and                 During PF-01                            No connection timeouts;            SAD 5.4
+     10          timeouts                                                         maximum active connections at
+                                                                                  most 20
+
+     PF-         Start-up                 docker compose up                       Under 60 seconds on an empty       NFR-POR-
+     11                                   to readiness                            database; under 90 seconds         01
+                                                                                  with the 100,000-order dataset
+
+     PF-         Data                     Seed and the                            Under 60 seconds and under 2       FR-CFG-
+     12          scripts                  100,000-order                           minutes                            02, FR-
+                                          generator                                                                  CFG-03
+
+     PF-         Menu reads               200 users request                       p95 under 50 ms; cache hit ratio   FR-
+     13                                   /menu with their                        above 95 percent                   MENU-06
+                                          ETags
+
+
+
+
+                                                                                                                          Page 43 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID          Scenario                 Load                                    Pass criteria                     Source
+
+     PF-         Board                    50 users request                        p95 under 50 ms; at most about    LLD 3.8
+     14          reads                    /board continuously                     one database query per second
+
+     PF-         Stream                   50 streams (the cap)                    No lost events; sender threads    SAD 9.4
+     15          capacity                 and 20 events a                         under 50 percent busy; memory
+                                          second                                  per stream recorded
+
+     PF-         Login cost               20 logins a second                      No failures other than 429 from   SC-23
+     16                                   for 1 minute                            the limiter; CPU use recorded,
+                                                                                  as BCrypt at cost 12 is
+                                                                                  deliberately expensive
+
+
+
+  12.3 k6 outline for PF-01
+
+     import http from 'k6/http';
+     import { check } from 'k6';
+     import { uuidv4 } from 'https://jslib.k6.io/k6-utils/1.4.0/index.js';
+
+
+     const BASE = __ENV.BASE_URL || 'http://localhost:8080/api/v1';
+
+
+     export const options = {
+       scenarios: {
+             create_orders: {
+               executor: 'ramping-vus',
+               stages: [ { duration: '30s', target: 50 }, { duration: '2m', target: 50
+     }, { duration: '10s', target: 0 } ],
+         },
+          },
+          thresholds: {
+            'http_req_duration{endpoint:create_order}': ['p(95)<300'],
+            'http_req_failed{endpoint:create_order}': ['rate<0.001'],
+          },
+     };
+
+
+     export function setup() {
+       // log in the 10 seeded cashier accounts used by the load profile and
+     return their tokens
+       return loginCashiers();
+     }
+
+
+
+
+                                                                                                                         Page 44 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     export default function (tokens) {
+       const token = tokens[__VU % tokens.length];
+       const res = http.post(`${BASE}/orders`, JSON.stringify({ orderType:
+     'TAKEAWAY', lines: pickLines() }), {
+         headers: { 'Content-Type': 'application/json', Authorization: `Bearer
+     ${token}`, 'Idempotency-Key': uuidv4() },
+         tags: { endpoint: 'create_order' },
+       });
+         check(res, { created: (r) => r.status === 201 });
+     }
+
+
+
+  12.4 Review after each run
+  Rank pg_stat_statements by total time and confirm that no hot-path statement averages
+  above 100 ms; confirm that the plans still match DBD 7.2; save the k6 summary, the
+  Micrometer export and the plans next to the run's date.
+
+
+  13. Acceptance scenarios (AT)
+  These are the 11 scenarios of SRS section 12.2 as end-to-end scripts. They run against the
+  Compose stack with the seed data (DBD 10), either from the screens or from the Bruno
+  collection. Common set-up: the stack is up, the database freshly seeded, and the users
+  cashier1, manager1, admin1, fry1, grill1, assembly1, beverage1 and multi1 exist.
+
+  AT-01 Happy path.
+
+     1. Log in as cashier1, fry1, assembly1 and beverage1. Open the streams of the Fry,
+        Assembly and Beverage stations and the board stream.
+     2. GET /menu and note the ETag.
+     3. As cashier1, POST /orders (TAKEAWAY): 2 Spicy Chicken Burger with Hot and Extra
+         cheese, 1 Cola with Large, with key K1. Expect 201, status CREATED and total 513.72.
+     4. GET the bill: provisional, paid false, total 513.72.
+     5. POST a UPI payment of 513.72. Expect 201 and an order that is IN_KITCHEN with three
+         tickets.
+     6. Within 1 second each station stream shows its ticket (the burger on Fry and on
+        Assembly, the cola on Beverage), and the board lists the token as preparing.
+     7. fry1, assembly1 and beverage1 each start and bump their ticket. The third bump
+         reports becameReady true.
+     8. The board moves the token to ready; the stations show no tickets.
+
+
+
+                                                                                          Page 45 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     9. cashier1 completes the order. Expect COMPLETED and the token gone from the
+        board.
+   10. As manager1, read the audit trail of the order.
+
+  Pass when every expectation holds, the audit shows ORDER_CREATED, ORDER_PAID,
+  ORDER_IN_KITCHEN, three TICKET_STARTED, three TICKET_BUMPED, ORDER_READY
+  and ORDER_COMPLETED (and PAYMENT_RECORDED for the payment), the bill totals
+  still read 513.72, and C1 to C7 are clean.
+
+  AT-02 Validation. As manager1, mark Cola unavailable (M-17). As cashier1, POST an order
+  with Cola quantity 1 and Classic Veg Burger quantity 0. Expect one 422
+  VALIDATION_FAILED listing lines[0].itemId with ITEM_UNAVAILABLE and
+  lines[1].quantity with OUT_OF_RANGE; no order created; token counter and stock
+  unchanged. Then POST an order containing only the unavailable Cola: expect top-level
+  422 ITEM_UNAVAILABLE.
+
+  AT-03 Idempotent retry. Send the same POST /orders with one key from 50 threads at
+  once. Expect one order, 50 responses of 201 with identical bodies, 49 with Idempotency-
+  Replayed true. Then reuse the key with a different payload: 422
+  IDEMPOTENCY_KEY_REUSED. Finally simulate a lost response (cut the connection after
+  the server committed) and retry: the original order comes back.
+
+  AT-04 Last item. Choco Lava Cake has stock 10. Send 100 concurrent orders of one unit
+  each. Expect exactly 10 created and 90 failing with 409 OUT_OF_STOCK; stock 0; GET
+  /menu shows the item unavailable. As manager1 add 5 units (I-02): the item is available
+  again and one more order succeeds.
+
+  AT-05 Concurrent ticket update. With an IN_PROGRESS ticket at Fry, fry1 and multi1
+  bump it at the same moment. Expect one 200 and one 409; the ticket is DONE once; one
+  TICKET_BUMPED audit record.
+
+  AT-06 Recall. Bump the last ticket of an order: it becomes READY and the board shows it
+  ready. Within 10 minutes, fry1 recalls the ticket: the ticket is IN_PROGRESS, the order
+  IN_KITCHEN and the token is back in preparing. Bump again for READY. Advance the
+  clock 11 minutes and recall: 409 with reason RECALL_WINDOW_EXPIRED. Complete the
+  order and recall: 409 with reason ORDER_COMPLETED.
+
+  AT-07 Cancellation rules. (a) cashier1 cancels a CREATED order: 200, stock restored. (b)
+  cashier1 cancels an IN_KITCHEN order: 403. (c) manager1 cancels that order with a
+  reason: 200, tickets CANCELLED with notices on the stations, stock not restored, a
+  pending refund. (d) manager1 cancels a READY order: 409. (e) Cancelling the cancelled
+  order again: 409 with currentStatus CANCELLED.
+
+
+                                                                                        Page 46 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  AT-08 Access control. Run the role matrix RM-01 and the station cases RM-02, RM-03 and
+  RM-04. Expect 401 or 403 exactly as specified every time, and a deactivated user unable
+  to log in.
+
+  AT-09 Reconnect. Open a station stream, then cut it (stop the proxy) for 30 seconds while
+  3 orders are paid. Restore it. Expect the client to reconnect with its backoff, reload the
+  snapshot, and within 3 seconds show all open tickets in the right order with no duplicate.
+
+  AT-10 Reports. Load the known report dataset and run R-01 to R-05: every figure equals
+  the stored expected sheet. Run the four main reports on the 100,000-order dataset: each
+  p95 under 2 seconds.
+
+  AT-11 Fault injection. Switch on the test fault that makes ticket creation fail, and pay a
+  CREATED order. Expect 500; the order still CREATED at its old version; no payment, no
+  tickets, no audit, no events. Switch the fault off and pay again: 201.
+
+
+  14. Usability checks and the demo
+
+  14.1 Usability and compatibility (US)
+
+     ID           Check                                           Method                        Pass criteria
+
+     US-          A newcomer enters a 3-                          3 testers, a 5-minute         Each finishes within 60
+     01           item order and records                          walkthrough, a stopwatch      seconds (NFR-USE-02)
+                  payment
+
+     US-          Readability of the station                      Checklist and automated       Item names at least 24
+     02           and board screens                               measurement                   px; status shown by text
+                                                                                                or icon as well as colour
+                                                                                                (a greyscale screenshot
+                                                                                                still readable); touch
+                                                                                                targets at least 44 px;
+                                                                                                legible from 1.5 metres
+                                                                                                (NFR-USE-01)
+
+     US-          Browsers and devices                            AT-01 run on current          Every step completes;
+     03                                                           Chrome, Edge and Firefox      streams work; no console
+                                                                  on a desktop, and Chrome      errors
+                                                                  at 10-inch landscape tablet
+                                                                  size
+
+
+
+
+                                                                                                                     Page 47 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID           Check                                           Method                       Pass criteria
+
+     US-          Contrast and keyboard                           An automated accessibility   No contrast failures at
+     04                                                           scan; keyboard-only use of   the AA level; every admin
+                                                                  the admin screens            action reachable
+
+     US-          Error messages on the                           Trigger each error below     The behaviour in the
+     05           POS                                             and read the screen          table
+
+
+
+     Error                                      Expected screen behaviour
+
+     OUT_OF_STOCK                               Names the short items and offers to remove them
+
+     ITEM_UNAVAILABLE                           Greys out the item and asks to remove it
+
+     AMOUNT_MISMATCH                            Says the order changed and reloads the current
+                                                total
+
+     STALE_VERSION                              Reloads the current state with a short notice
+
+     RATE_LIMITED                               Shows how many seconds to wait
+
+     SERVICE_BUSY                               Shows a retry banner and retries with backoff
+
+     UNAUTHENTICATED                            Refreshes the token silently and repeats the call;
+                                                shows the login screen if that fails
+
+     FORBIDDEN                                  Says the action is not allowed for this user
+
+     Network offline                            Shows an offline banner; station screens keep
+                                                polling
+
+
+
+  14.2 The demo (DM)
+  DM-01 The 5-minute demo script
+
+
+     Time         Action                                          Expected                     What to say
+
+     0:00         Show the running stack,                         Everything is up             The system takes an
+                  the seeded menu, the                                                         order, sends it to the
+                  station screens and the                                                      right stations and tracks
+                  board                                                                        it to the counter
+
+
+
+
+                                                                                                                      Page 48 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Time         Action                                          Expected                       What to say
+
+     0:30         Create and pay the                              Three tickets appear on        Pay first, then the order
+                  513.72 order                                    three screens in under a       is routed by station
+                                                                  second
+
+     1:30         Start and bump the                              The board shows READY,         The order becomes
+                  tickets; complete the                           then the token leaves          READY exactly once,
+                  order                                                                          even if two cooks bump
+                                                                                                 together
+
+     2:30         Run the concurrency                             10 orders and 90 clean         Conditional update for
+                  script: 100 orders for the                      OUT_OF_STOCK; one order        stock, insert-first
+                  item with stock 10; then                        for the 50 retries             idempotency
+                  50 identical retries with
+                  one key
+
+     3:15         Stop the proxy for 20                           Screens reconnect and          The database is the
+                  seconds, then restore it                        match the queue                truth; the push is only a
+                                                                                                 hint
+
+     3:45         As the manager, show                            Figures and a complete trail   Audit is written in the
+                  the reports and the                                                            same transaction
+                  audit trail of the order
+
+     4:30         Show CI green and the                           Tests pass; the mutation       How I proved it
+                  stuck-order mutation                            test shows the bug without
+                  test                                            the lock
+
+
+  DM-02 Before the demo and fallbacks
+
+
+     Check or risk                             Action
+
+     Clean start                               Database reset and seeded, all services healthy,
+                                               clock and time zone correct
+
+     Accounts                                  Passwords known; one token already refreshed
+
+     Rehearsal                                 The script run twice on the demo machine
+
+     Stream demo fails                         Show the polling fallback and explain the
+                                               resynchronisation
+
+
+
+
+                                                                                                                       Page 49 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Check or risk                             Action
+
+     Machine fails                             A recorded video of the full script and the
+                                               exported test reports
+
+     A question goes deep                      Open the architecture decision records (SAD
+                                               section 14) and the concurrency section (SAD
+                                               section 6)
+
+
+
+
+  15. Traceability matrix
+  Every test method carries a @Covers annotation naming the requirement IDs it proves. A
+  check, AR-14, reads the annotations and fails the build when any Must requirement has no
+  test, so this matrix cannot go stale silently. CT followed by an endpoint ID means the
+  contract cases of that endpoint (section 6.1).
+
+
+  15.1 Functional requirements
+
+     Requirement                                  Tests
+
+     FR-AUTH-01                                   CT A-01, SC-01, SC-23, SC-24, RM-04, AT-08
+
+     FR-AUTH-02                                   SC-09, SC-23, PC-11
+
+     FR-AUTH-03                                   RM-01, AR-06, SC-17, AT-08
+
+     FR-AUTH-04                                   RM-02, SS-09, SS-10, CT K-01 to K-06
+
+     FR-AUTH-05                                   CT U-01 to U-05, PC-11, CC-12, RM-05
+
+     FR-AUTH-06                                   CT A-01, RL-04, RL-05, RL-06, CC-14
+
+     FR-AUTH-07                                   CT A-02, CT A-03, CC-13, SC-12, SC-13
+
+     FR-MENU-01 to 03                             CT M-02 to M-16, DB-04, PC-10
+
+     FR-MENU-04                                   CT M-17, PC-08, CC-11, CA-02, CA-08, AT-02
+
+     FR-MENU-05                                   CT M-09, DB-05, PC-10
+
+     FR-MENU-06                                   CT M-01, WS-08, CA-01 to CA-04, CA-11, PF-13
+
+     FR-MENU-07                                   CT M-18 to M-21, UT-16, PC-04
+
+     FR-MENU-08                                   UT-02, PC-01, CA-07
+
+
+
+                                                                                                 Page 50 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Requirement                                  Tests
+
+     FR-ORD-01, FR-ORD-02                         CT O-01, UT-10, WS-02, AT-02
+
+     FR-ORD-03                                    UT-01, UT-02, DB-04, CT O-01, PC-01
+
+     FR-ORD-04                                    UT-14, CC-08, DB-13
+
+     FR-ORD-05                                    UT-06, CT O-04 to O-06, CC-06
+
+     FR-ORD-06                                    CT O-04, PC-02, CC-07
+
+     FR-ORD-07                                    CT O-05, PC-03, RM-03, AT-07
+
+     FR-ORD-08                                    CT O-06, AT-01
+
+     FR-ORD-09                                    CT O-02, WS-07, DB-09, PF-03
+
+     FR-ORD-10                                    CT-ID-01 to CT-ID-08, CC-01, CC-01m, AT-03
+
+     FR-ORD-11                                    CT O-07, DB-10 (C5)
+
+     FR-ORD-12                                    PC-14, CC-09
+
+     FR-PAY-01, FR-PAY-02                         CT P-01, PC-04, RS-01, AT-01, AT-11
+
+     FR-PAY-03                                    CC-05, CC-05m, DB-03, CT P-01
+
+     FR-PAY-04                                    CT P-01, CC-07
+
+     FR-PAY-05                                    CT P-03, UT-02, PC-04
+
+     FR-PAY-06                                    CT P-01, DB-04
+
+     FR-PAY-07                                    CT P-05, CT P-06, PC-03, PC-13
+
+     FR-PAY-08                                    CT P-04
+
+     FR-KDS-01                                    UT-16, PC-04
+
+     FR-KDS-02                                    CT K-01, DB-09, DB-15, UT-08
+
+     FR-KDS-03                                    CT K-03, CT K-04, PC-05, PC-06, AT-01
+
+     FR-KDS-04                                    CT K-05, PC-07, AT-06
+
+     FR-KDS-05                                    SS-01 to SS-08, SS-11 to SS-13, SS-15, SS-17 to SS-19,
+                                                  AT-09, PF-02
+
+     FR-KDS-06                                    CC-04, CC-04m, PC-06, AT-06
+
+
+
+
+                                                                                                           Page 51 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Requirement                                  Tests
+
+     FR-KDS-07                                    CC-03, CT-VER-01, AT-05
+
+     FR-KDS-08                                    CT K-06, PC-03, DB-04, AT-07
+
+     FR-KDS-09                                    CT K-07, SS-16
+
+     FR-KDS-10                                    CT K-01, DB-15, US-02
+
+     FR-BRD-01 to 04                              CT B-01, SS-14, PC-04, PC-06, PC-07, PF-14, US-02
+
+     FR-INV-01 to 05                              CT I-01 to I-03, CC-02, CC-02m, CC-15, PC-09, AT-
+                                                  04
+
+     FR-RPT-01 to 07                              CT R-01 to R-05, DB-16, AT-10, PF-04, PF-09
+
+     FR-AUD-01                                    CT AU-01, PC-01 to PC-14, AT-01
+
+     FR-AUD-02                                    DB-06, DB-07, SC-14
+
+     FR-AUD-03                                    CT AU-01, PF-05
+
+     FR-AUD-04                                    RS-02
+
+     FR-CFG-01                                    CT C-01, CT C-02, PC-12, CA-05
+
+     FR-CFG-02, FR-CFG-03                         DB-11, DB-12, PF-12
+
+     FR-SYS-01                                    WS-01, section 6.1 envelope checks
+
+     FR-SYS-02                                    AR-08
+
+     FR-SYS-03                                    WS-07
+
+     FR-SYS-04                                    WS-05, SC-21
+
+     FR-SYS-05                                    CT H-01, CT H-02, RS-03
+
+
+
+  15.2 Business rules and quality requirements
+
+     Requirement                                                  Tests
+
+     BR-01                                                        CC-08, DB-13, UT-14
+
+     BR-02, BR-03                                                 UT-01, UT-02, DB-04
+
+     BR-04                                                        CT O-01, CA-08, CC-11
+
+
+
+                                                                                                      Page 52 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Requirement                                                  Tests
+
+     BR-05                                                        UT-06, CT O-05, PC-03, RM-03
+
+     BR-06                                                        CC-04
+
+     BR-07, BR-08                                                 CT P-01, DB-04, CC-07
+
+     BR-09                                                        DB-12 (C6), UT-16, CT M-06, CT M-10
+
+     BR-10                                                        DB-15, CT K-01, UT-16
+
+     BR-11                                                        UT-08, CT K-01
+
+     BR-12                                                        CC-02, CC-15, PC-03, DB-04
+
+     BR-13                                                        PC-01 to PC-14, RS-02
+
+     BR-14                                                        CT O-04
+
+     BR-15                                                        CT-ID-01 to CT-ID-08, CC-01
+
+     BR-16                                                        UT-05, PC-01
+
+     BR-17                                                        CT K-05, AT-06
+
+     BR-18                                                        UT-04, DB-14
+
+     NFR-PERF-01, 03, 04                                          PF-01, PF-10, PF-03, PF-04
+
+     NFR-PERF-02                                                  SS-02, PF-02
+
+     NFR-CONC-01 to 04                                            CC-01, CC-02, CC-03, CC-04 and their variants
+
+     NFR-SEC-01                                                   SC-01, SC-15, SC-24
+
+     NFR-SEC-02                                                   WS-02, SC-03, SC-04
+
+     NFR-SEC-03                                                   SC-07, SC-08
+
+     NFR-SEC-04                                                   SC-09 and a schema review showing no customer
+                                                                  personal data
+
+     NFR-SEC-05                                                   SC-01 to SC-25 as the evidence for the OWASP Top
+                                                                  10 review
+
+     NFR-REL-01                                                   RS-01, RS-02, DB-05
+
+     NFR-REL-02                                                   RS-07, SS-04
+
+
+
+
+                                                                                                                     Page 53 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Requirement                                                  Tests
+
+     NFR-REL-03                                                   DB-01, RS-15
+
+     NFR-USE-01, 02                                               US-02, US-01
+
+     NFR-MNT-01 to 03                                             AR-01 to AR-05, AR-13
+
+     NFR-OBS-01, 02                                               WS-05, SC-21, CA-11, RL-07
+
+     NFR-POR-01, NFR-DOC-01                                       PF-11, DM-01, AR-08
+
+     Goal G1 (correctness under rush)                             CC-01 to CC-15, DB-10, AT-03 to AT-06
+
+     Goal G2 (real-time visibility)                               SS-01 to SS-19, PF-02, AT-09
+
+     Goal G3 (lifecycle and audit)                                UT-06, UT-07, PC-01 to PC-14, AT-01, AT-07
+
+     Goal G4 (kitchen performance)                                CT R-01 to R-05, DB-16, AT-10
+
+     Goal G5 (easy to run and show)                               DB-11, DB-12, PF-11, DM-01
+
+     Goal G6 (defensible engineering)                             AR-01 to AR-14, SC-01 to SC-25, the mutation
+                                                                  variants, the CI gates
+
+
+
+
+  16. Schedule, risks and open items
+
+  16.1 Tests to write at each build step
+  The steps are those of LLD section 7. Write these tests first at each step.
+
+
+     Step         Tests to write first
+
+     1            DB-01, DB-02
+
+     2            UT-01 to UT-05, UT-14
+
+     3            WS-01 to WS-05, WS-09, WS-10
+
+     4            RM-01 (for implemented endpoints), RM-04, AR-
+                  06, SC-01, SC-17
+
+     5            CT A-01 to A-05, CT U-01 to U-04, UT-09, RL-04 to
+                  RL-06, CC-14, SC-11 to SC-13, SC-22 to SC-25
+
+     6            DB-12
+
+
+
+                                                                                                                 Page 54 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Step         Tests to write first
+
+     7            CT M-01 to M-17, WS-08, CA-01 to CA-04, CA-09 to
+                  CA-11
+
+     8            UT-02, UT-10, CT O-01 to O-03, PC-01, WS-07
+
+     9            UT-06, CT O-04 to O-07, PC-02, PC-03, PC-14, RM-
+                  03, CC-06, CC-07, CC-09
+
+     10           UT-16, CT P-01 to P-06, PC-04, RS-01, AT-11, CC-05,
+                  CC-05m
+
+     11           UT-07, UT-08, CT K-01 to K-07, PC-05 to PC-07, CC-
+                  03, CC-04, CC-04m, RM-02, AT-05, AT-06
+
+     12           SS-01 to SS-19, CT B-01, RS-09
+
+     13           CT-ID-01 to CT-ID-08, CC-01, CC-01m, AT-03
+
+     14           CT I-01 to I-03, CC-02, CC-02m, CC-15, PC-09, AT-
+                  04
+
+     15           CT AU-01, RS-02, SC-14
+
+     16           RL-01 to RL-14, CA-05 to CA-08, CC-10, CC-10b, RS-
+                  04 to RS-06, RS-10 to RS-12
+
+     17           The full concurrency suite repeated 50 times, with
+                  every mutation variant
+
+     18           CT R-01 to R-05, DB-16, AT-10, PF-09
+
+     19           PF-01 to PF-16, DB-09, DB-11, AR-07 to AR-14, RS-03,
+                  RS-07, RS-08, RS-13 to RS-17, SS-15, AT-08, US-01 to
+                  US-05, DM-01
+
+
+
+  16.2 If time runs short
+  Cut in this order, and never cut the first two groups: (1) the concurrency suite with its
+  mutation variants and the acceptance scenarios AT-01 to AT-11; (2) the contract cases and
+  post-conditions of Must endpoints; then, from the bottom up: usability checks, the
+  statistical and nightly security cases (SC-11, SC-25), the Could and Should endpoint cases,
+  stress and soak runs (PF-06, PF-07, PF-15), and the Nginx proxy cases (SS-15, RL-13, RL-14).
+
+
+
+
+                                                                                         Page 55 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  16.3 Risks to the test effort
+
+     Risk                                                                         Mitigation
+
+     The volume of cases is large                                                 One generic runner reads the YAML files;
+                                                                                  adding a case is adding data, not code
+
+     Concurrency tests are flaky                                                  Barriers and hooks make the interleavings
+                                                                                  deterministic where it matters; the failure
+                                                                                  budget is zero, so a flake is investigated at
+                                                                                  once
+
+     Performance numbers depend on the                                            One named reference machine; thresholds
+     machine                                                                      copied from the SRS; three runs and the
+                                                                                  median
+
+     Production code gains test seams                                             The TestHooks beans do nothing in production
+                                                                                  and exist only for the mutation variants (open
+                                                                                  item OI-05)
+
+     The API document and the YAML drift                                          AR-07 compares them on every build
+     apart
+
+
+
+  16.4 Open items
+
+     ID             Item                                                                            Decide in
+
+     OI-01          Automate the screen checks (SC-19, US-02, RS-13)                                Phase 4
+                    with Playwright, or run them as manual checks
+
+     OI-02          The performance thresholds are set for the                                      Phase 4
+                    reference machine; record the machine used for
+                    the demo
+
+     OI-03          The timing check SC-11 is statistical; accept a                                 Phase 3
+                    nightly-only status if it proves noisy
+
+     OI-04          Generate the case YAML from the exported API                                    Phase 1
+                    document with a script, or write it by hand
+
+     OI-05          Confirm that no-op test seams (TestHooks) in                                    Phase 2
+                    production code are acceptable
+
+
+
+
+                                                                                                                                  Page 56 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID             Item                                                          Decide in
+
+     OI-06          Run contract cases in parallel to shorten the run, or         Phase 3
+                    keep them sequential
+
+
+
+
+  17. Consolidated change register
+  Documents 3 to 6 each proposed changes to earlier documents. They are gathered here,
+  de-duplicated, as one checklist. Apply them in one pass before the code reaches the
+  steps they affect, producing SRS v0.2, SAD v0.2, DBD v0.2, API v0.2 and LLD v0.2, and tick
+  each one off.
+
+
+     #          Target             Change                                              Origin
+
+     1          SRS                Add error codes METHOD_NOT_ALLOWED,                 SAD 15.2, API 17.2
+                                   NOT_ACCEPTABLE, RESOURCE_IN_USE,
+                                   PAYLOAD_TOO_LARGE,
+                                   UNSUPPORTED_MEDIA_TYPE and
+                                   SERVICE_BUSY. Define INVALID_TRANSITION
+                                   as an operation not allowed in the current state.
+                                   State the ITEM_UNAVAILABLE versus
+                                   VALIDATION_FAILED rule
+
+     2          SRS                Add as Should: change-password, admin               SAD 15.2, API 17.2
+                                   password reset, refund completion and the
+                                   stock list. FR-AUTH-06: lockout state is
+                                   persisted, and unknown usernames are
+                                   throttled like known ones
+
+     3          SRS                Add the limits (30 lines per order, 10 modifier     API 17.2
+                                   groups per item, 20 modifiers per group, prices
+                                   up to 99999.99, passwords of 8 to 72 bytes) and
+                                   two API rules: unknown properties and
+                                   parameters are rejected, and money is carried
+                                   as strings
+
+     4          SRS                Add NFR-SEC-06 (rate limits above the design        SAD 15.2
+                                   workload, no 429 at that workload) and NFR-
+                                   PERF-05 (reports limited to 2 concurrent
+                                   queries)
+
+
+
+
+                                                                                                            Page 57 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     #          Target             Change                                             Origin
+
+     5          SRS                Update FR-KDS-05 (SNAPSHOT_REQUIRED and            SAD 15.2, API 17.2
+                                   STREAM_CLOSING events; streams close at
+                                   token expiry), FR-MENU-06 (ETag and 304), FR-
+                                   ORD-09 (cursor mode, 92-day cap) and FR-RPT-
+                                   03 (the per-item measure is the cycle time of
+                                   the item's ticket)
+
+     6          SRS                Section 9: add menu_version and                    DBD 15.2, SAD 15.2
+                                   order_line_component; ticket.business_day,
+                                   rush, cancel_ack_at, recall_count;
+                                   orders.cancel_reason_code,
+                                   cancel_reason_text, cancelled_by;
+                                   payment.change_due (and FR-PAY-06 stores it);
+                                   IdempotencyRecord without a status; the
+                                   partial indexes in DR-07; record OI-02 and OI-03
+                                   as closed
+
+     7          SAD                Section 4.1: station is owned by config. Section   DBD 15.2, LLD 8.2
+                                   5.3: the menu cache holds one entry per filter
+                                   combination (at most 64), and the board
+                                   snapshot is cached for 1 second
+
+     8          SAD                Section 5.2 and 9: add the                         API 17.2, LLD 8.2
+                                   REPORT_CONCURRENCY and
+                                   CONNECTION_CAP details, the guidance for
+                                   polling boards, the STREAM_CLOSING event,
+                                   and SNAPSHOT_REQUIRED with reasons
+                                   SERVER_SHUTDOWN and OVERLOAD
+
+     9          SAD                DD-02: batch inserts need sequence ids with        DBD 15.2, LLD 8.2
+                                   INCREMENT 50. Section 5.4: the report
+                                   statement timeout is set per transaction with
+                                   SET LOCAL. Section 16.3: replace the state
+                                   machine sketch with the two-step check (no
+                                   rule gives 409, an excluded role gives 403)
+
+
+
+
+                                                                                                           Page 58 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     #          Target             Change                                            Origin
+
+     10         DBD                Grant kf_app DELETE on menu_item,                 API 17.2, LLD 8.2
+                                   modifier_group, modifier, item_stock and
+                                   combo (referenced rows stay protected by
+                                   foreign keys), and on order_line,
+                                   order_line_modifier and order_line_component
+                                   with the guard trigger of LLD 8.2; amend DD-10
+                                   to allow the guard
+
+     11         DBD                S5 gains AND total = :amount; S3 returns the      API 17.2, LLD 8.2
+                                   new quantity; add S12b (per-item cycle time)
+                                   and S14 (cancellations by reason and role),
+                                   whose SQL is in LLD 8.2
+
+     12         API                Section 2.5: authentication (401) comes before    LLD 8.2
+                                   the syntax checks, and the URL-level 403 before
+                                   body parsing; renumber the table
+
+     13         API                Section 12.2: SNAPSHOT_REQUIRED carries           LLD 8.2
+                                   reason SERVER_SHUTDOWN or OVERLOAD
+
+     14         LLD                Section 2.3: make the stream heartbeat (default   This document, 3.4
+                                   15 seconds) and the emitter margin
+                                   configuration properties, so tests can shorten
+                                   them
+
+     15         LLD                Section 3.4: set spring.jackson.parser.strict-    This document, WS-02
+                                   duplicate-detection to true, so a duplicate
+                                   JSON property is a 400
+
+     16         LLD                Section 4.6: SlaCalculator compares exact         This document, UT-08
+                                   products (age times 100 against the threshold
+                                   times the target), not a truncated percent; the
+                                   301-second vector of UT-08 guards it
+
+     17         LLD                The Nginx configuration answers its own 429       This document, RL-13
+                                   and 413 responses with the standard JSON
+                                   envelope
+
+
+
+
+                                                                                                         Page 59 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     #          Target             Change                                                           Origin
+
+     18         LLD                Section 6.2: extend the TestHooks seam to                        This document, CC,
+                                   idempotency (between the check and the                           RS-01
+                                   insert), stock (between read and write) and
+                                   payment, for the mutation variants CC-01m, CC-
+                                   02m and CC-05m; add a test-only switch that
+                                   makes ticket creation fail, active only in the test
+                                   and loadtest profiles
+
+     19         LLD                Section 3.7: inject a time meter into the bucket                 This document, 3.3, 3.4
+                                   store; add roles-test.sql and a DatabaseCleaner
+                                   that truncates as the schema owner
+
+     20         Process            Export the API document to Markdown in                           This document, AR-07
+                                   docs/api.md on each release, because AR-07
+                                   reads its case tables
+
+
+  Change 16 has already been applied to LLD section 4.6.
+
+
+  18. Where the document set stands
+
+     Document                                                           ID           Status
+
+     1 Product Development Document                                     KF-PDD-      v0.1
+                                                                        001
+
+     2 Software Requirements                                            KF-SRS-      v0.1, changes 1 to 6 pending
+     Specification                                                      001
+
+     3 System Architecture                                              KF-SAD-      v0.1, changes 7 to 9 pending
+                                                                        001
+
+     4 Database Design                                                  KF-DBD-      v0.1, changes 10 and 11 pending
+                                                                        001
+
+     5 API Specification                                                KF-API-001   v0.1, changes 12 and 13 pending
+
+     6 Low-Level Design                                                 KF-LLD-      v0.1, changes 14 to 19 pending (16
+                                                                        001          applied)
+
+     7 Test Plan and Test Cases                                         KF-TPL-001   v0.1
+
+
+
+
+                                                                                                                          Page 60 of 61
+Test Plan and Test Cases: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  The design phase is complete. The next work is the build: apply the change register, then
+  follow the 19 steps of LLD section 7, writing the tests of section 16.1 first at each step.
+
+
+     Version           Date                             Author           Change
+
+     0.1               30 October 2026                  Rathi            First draft
+
+
+
+
+                                                                                        Page 61 of 61
+

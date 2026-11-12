@@ -1,0 +1,1817 @@
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  Software Requirements Specification:
+  KitchenFlow Restaurant Order & Kitchen
+  Display System
+  Document ID: KF-SRS-001 · Version 0.1 (draft) · 28 October 2026 · Author: Rathi · Related:
+  Product Development Document (KF-PDD-001) v0.1
+
+
+  1. Introduction
+
+  1.1 Purpose
+  This document specifies what KitchenFlow shall do and how well it shall do it. It is
+  document 2 of 7 and the contract between the product idea (document 1) and the design
+  documents (3 to 6): every design element and every test must trace back to a
+  requirement ID in this document.
+
+
+  1.2 Scope
+  KitchenFlow is a web-based order and kitchen-display system for one quick service
+  restaurant (QSR) outlet. It covers counter order entry with pricing and GST, simulated
+  payment recording, automatic routing of items to kitchen stations, a real-time kitchen
+  display with start, bump and recall, a customer status board, lightweight inventory, an
+  audit trail and management reports.
+
+  Out of scope for version 1: real payment gateways, delivery-aggregator integrations, multi-
+  outlet or multi-tenant operation, printer or POS hardware integration, customer accounts
+  and personal data, demand forecasting and machine learning, and native mobile apps.
+
+
+  1.3 Intended readers
+  The developer (implementation and testing), reviewers and interviewers (to judge
+  engineering depth), and anyone writing the later documents.
+
+
+  1.4 Conventions
+        IDs: FR-MODULE-nn functional requirement; BR-nn business rule; NFR-CATEGORY-nn
+        quality requirement; AT-nn acceptance scenario; OI-nn open issue.
+
+
+
+
+                                                                                             Page 1 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+        Priority: M (Must, written as shall), S (Should, written as should), C (Could, written as
+        may). Priorities follow the MoSCoW scope in document 1.
+        Verification: T automated test, D demonstration, I inspection of code, configuration or
+        documents.
+        Every requirement is atomic and testable. Money is in INR with two decimals. Times are
+        shown in Asia/Kolkata.
+
+
+  1.5 References
+   1. KF-PDD-001, Product Development Document, v0.1.
+   2. ISO/IEC/IEEE 29148, Requirements engineering (used as a structural guide).
+   3. Glossary in section 15.
+
+
+  2. Overall description
+
+  2.1 Product perspective
+  KitchenFlow is a new, self-contained system built as a modular monolith. Clients are web
+  screens (cashier POS, kitchen station boards, manager board, customer status board,
+  admin screens) that talk to one REST and server-sent-events API backed by a relational
+  database. Version 1 has no integration with external systems.
+
+
+  2.2 Product functions
+
+     Module                                         Code            Summary
+
+     Authentication and users                       AUTH            Login, roles, station binding
+
+     Menu                                           MENU            Categories, items, modifiers, availability, combos
+
+     Orders                                         ORD             Order entry, pricing, lifecycle, cancellation, search
+
+     Payments                                       PAY             Simulated payment recording, bill, refund entry
+
+     Kitchen display                                KDS             Tickets per station, start, bump, recall, timers, push
+
+     Status board                                   BRD             Public token board
+
+     Inventory-lite                                 INV             Stock reservation and automatic unavailability
+
+     Reporting                                      RPT             Sales and kitchen-timing reports in SQL
+
+
+
+
+                                                                                                                            Page 2 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Module                                         Code            Summary
+
+     Audit                                          AUD             Append-only event log
+
+     Configuration                                  CFG             Stations, tax, thresholds, seed data
+
+     Platform                                       SYS             API conventions, documentation, health, logging
+
+
+
+  2.3 Operating environment
+        Server: Java 17 or newer (Java 21 preferred) on Windows, Linux or macOS, or in a
+        Docker container.
+        Database: PostgreSQL 15 or newer (MySQL 8 is an acceptable alternative; the choice is
+        closed in document 3).
+        Clients: current Chrome, Edge or Firefox on a desktop or a 10-inch landscape tablet, on
+        the same local network as the server.
+
+
+  2.4 Design and implementation constraints
+        Java, Spring Boot and SQL are fixed by the project's purpose.
+        All money arithmetic uses decimal types, never floating point.
+        Every state-changing operation is transactional and audited.
+        The system stores no customer personal data.
+        One developer and a fixed time budget, so the Must list is protected first.
+
+
+  2.5 Design-basis workload
+  One outlet, 800 to 1,500 orders per day, a peak of about 150 orders per hour, up to 5 station
+  screens, 10 staff users at once and 1 status board. The load tests in section 8 deliberately
+  exceed this peak.
+
+
+
+
+                                                                                                                      Page 3 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  3. Users and permissions
+
+  3.1 User classes
+
+     Class                              Description
+
+     Cashier                            Takes orders and payments at the counter; hands
+                                        over finished orders
+
+     Kitchen                            Works at one or more stations; starts, bumps and
+                                        recalls tickets
+
+     Manager                            Runs the shift: sees all stations, cancels in-kitchen
+                                        orders, sets rush, toggles availability, adjusts stock,
+                                        reads reports and audit
+
+     Admin                              Configures menu, stations, tax, thresholds and
+                                        users
+
+     Public (customer)                  Reads the status board only; never logs in
+
+
+
+  3.2 Permission matrix
+
+    Capability                                                              Cashier Kitchen             Manager Admin Public
+
+    Log in                                                                  Yes              Yes        Yes     Yes    No
+
+    View menu                                                               Yes              Yes        Yes     Yes    No
+
+    Manage categories, items, modifiers, stations,                          No               No         No      Yes    No
+    tax, configuration
+
+    Mark item available or unavailable                                      No               No         Yes     Yes    No
+
+    Create or edit an order (while CREATED)                                 Yes              No         Yes     No     No
+
+    Record payment                                                          Yes              No         Yes     No     No
+
+    Cancel an order in CREATED                                              Yes              No         Yes     No     No
+
+    Cancel an order in IN_KITCHEN                                           No               No         Yes     No     No
+
+    View station tickets                                                    No               Own        All     No     No
+                                                                                             stations
+
+    Start, bump or recall tickets                                           No               Own        All     No     No
+                                                                                             stations
+
+    Mark order handed over                                                  Yes              No         Yes     No     No
+
+
+
+
+                                                                                                                               Page 4 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+    Capability                                                              Cashier Kitchen       Manager Admin Public
+
+    Flag order as rush                                                      No               No   Yes     No     No
+
+    Adjust stock                                                            No               No   Yes     Yes    No
+
+    View reports                                                            No               No   Yes     Yes    No
+
+    View audit log                                                          No               No   Yes     Yes    No
+
+    Manage users and roles                                                  No               No   No      Yes    No
+
+    View status board                                                       No               No   No      No     Yes (read
+                                                                                                                 only)
+
+
+  The status board is open to anyone on the network and exposes only token numbers and
+  statuses.
+
+
+  4. Business rules
+
+     ID             Rule
+
+     BR-01          Token numbers are unique within a business day,
+                    start at 1, increase by one per order and restart at
+                    the business-day cutoff (BR-16).
+
+     BR-02          All money uses decimal arithmetic in INR with two
+                    decimals. Each order line stores a snapshot of the
+                    unit price and GST rate used, so later menu
+                    changes never alter existing orders.
+
+     BR-03          GST per line = (unit price plus selected modifier
+                    prices) x quantity x category rate, rounded half-up
+                    to two decimals. Order total = sum of line amounts
+                    plus line GST. Menu prices are exclusive of GST
+                    (see OI-05).
+
+     BR-04          An unavailable or inactive item cannot be added to
+                    an order. Orders already created are unaffected.
+
+     BR-05          A CREATED order may be cancelled by a Cashier or
+                    Manager. An IN_KITCHEN order may be cancelled
+                    by a Manager only. READY and COMPLETED
+                    orders cannot be cancelled. A reason is always
+                    required.
+
+
+
+
+                                                                                                                         Page 5 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID             Rule
+
+     BR-06          An order is READY exactly when all of its non-
+                    cancelled tickets are DONE. Recalling a ticket of a
+                    READY order returns the order to IN_KITCHEN.
+
+     BR-07          Payment is taken before the kitchen sees the order
+                    (pay first). Partial and split payments are not
+                    supported in version 1.
+
+     BR-08          The payment amount must equal the order total.
+
+     BR-09          Every item maps to at least one station. An item
+                    mapped to several stations appears on the ticket
+                    of each of those stations. A combo has no station
+                    of its own; each component routes to its own
+                    stations.
+
+     BR-10          Station queues are ordered by RUSH first, then by
+                    payment time, oldest first.
+
+     BR-11          Ticket colour: green until 80 percent of the target
+                    time has elapsed, amber from 80 to 100 percent,
+                    red beyond 100 percent. A ticket's target is the
+                    longest target time among its items. Thresholds are
+                    configurable.
+
+     BR-12          Stock is reserved when an order is created and
+                    restored when the order is cancelled while
+                    CREATED. Cancelling an IN_KITCHEN order does
+                    not restore stock (treated as wastage). An item
+                    with tracked stock becomes unavailable at zero.
+
+     BR-13          Every state change, payment, price change,
+                    availability change and user or role change creates
+                    an audit record in the same transaction.
+
+     BR-14          An order can be edited only while CREATED.
+
+     BR-15          A request that repeats an Idempotency-Key within
+                    24 hours with an identical payload returns the
+                    original response. With a different payload it is
+                    rejected with 422 IDEMPOTENCY_KEY_REUSED.
+
+
+
+
+                                                                                             Page 6 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID             Rule
+
+     BR-16          The business day runs from the configured cutoff
+                    (default 04:00, Asia/Kolkata) to the next cutoff.
+                    Tokens and reports use the business day.
+
+     BR-17          A DONE ticket can be recalled only within the
+                    configured recall window (default 10 minutes) and
+                    only while its order is not COMPLETED.
+
+     BR-18          Timestamps are stored in UTC and displayed in
+                    Asia/Kolkata.
+
+
+
+
+  5. Functional requirements
+  Columns: ID, requirement, priority (Pri), acceptance criteria. Numbers in acceptance
+  criteria are targets to verify, not guesses.
+
+
+  5.1 Authentication and users (AUTH)
+
+     ID                    Requirement                                                  Pri   Acceptance criteria
+
+     FR-                   The system shall authenticate                                M     Valid credentials return 200 and a
+     AUTH-01               users by username and password                                     token. A wrong username or wrong
+                           and issue a signed access token                                    password returns 401 with the
+                           valid for 15 minutes.                                              same message.
+
+     FR-                   The system shall store passwords                             M     Database inspection shows no
+     AUTH-02               only as BCrypt hashes and shall                                    plain text; searching the logs for a
+                           never log or return them.                                          known test password finds nothing.
+
+     FR-                   The system shall enforce role-                               M     One test per endpoint and role
+     AUTH-03               based authorization on every                                       matches section 3.2.
+                           endpoint except login, health and                                  Unauthenticated calls return 401;
+                           the public status board.                                           unauthorized calls return 403.
+
+     FR-                   The system shall bind each                                   M     A Fry-station user requesting Grill
+     AUTH-04               Kitchen user to one or more                                        tickets receives 403.
+                           stations and let that user view
+                           and act only on those stations'
+                           tickets.
+
+
+
+
+                                                                                                                              Page 7 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID                    Requirement                                                  Pri   Acceptance criteria
+
+     FR-                   The Admin shall create,                                      M     A deactivated user cannot log in;
+     AUTH-05               deactivate and reactivate users                                    tokens already issued expire within
+                           and assign one role per user.                                      15 minutes.
+
+     FR-                   The system should lock an                                    S     The sixth attempt returns 429,
+     AUTH-06               account for 15 minutes after 5                                     even with the correct password,
+                           consecutive failed logins within 10                                during the lockout.
+                           minutes.
+
+     FR-                   The system should support                                    S     Reusing a consumed refresh token
+     AUTH-07               refresh tokens that rotate on                                      returns 401.
+                           every use.
+
+
+
+  5.2 Menu (MENU)
+
+     ID                    Requirement                                                 Pri    Acceptance criteria
+
+     FR-                   The Admin shall create, edit and                            M      Rate must be between 0 and 28
+     MENU-01               deactivate categories with                                         percent; a duplicate name returns
+                           name, display order and GST                                        422.
+                           rate.
+
+     FR-                   The Admin shall create, edit and                            M      An item with no station is rejected
+     MENU-02               deactivate items with name,                                        (BR-09); price must be greater than
+                           description, category, base                                        0.
+                           price, one or more stations,
+                           target preparation time in
+                           seconds and optional stock
+                           tracking.
+
+     FR-                   The Admin shall define modifier                             M      An order that violates a minimum or
+     MENU-03               groups per item with selection                                     maximum is rejected with field-level
+                           type (single or multiple),                                         errors (FR-ORD-02).
+                           minimum and maximum
+                           selections, and options with an
+                           optional price change.
+
+
+
+
+                                                                                                                              Page 8 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID                    Requirement                                                 Pri         Acceptance criteria
+
+     FR-                   The Manager and Admin shall                                 M           After marking unavailable, creating
+     MENU-04               mark an item unavailable or                                             an order with that item returns 422
+                           available, effective for new                                            ITEM_UNAVAILABLE within 1
+                           orders immediately.                                                     second.
+
+     FR-                   The system shall never hard-                                M           Deleting a used item returns 409;
+     MENU-05               delete an item that appears in                                          the item leaves the POS menu but
+                           any order; it shall deactivate it.                                      stays in order history.
+
+     FR-                   The system shall provide a POS                              M           Inactive items are excluded; filter by
+     MENU-06               menu endpoint that returns                                              category and text search work; p95
+                           active items grouped by                                                 under 300 ms.
+                           category with availability and
+                           modifier groups.
+
+     FR-                   The system should support                                   S           A combo order creates tickets for
+     MENU-07               combos: a named bundle of                                               each component's station and the
+                           items at a fixed price that                                             bill shows one combo line.
+                           expands into component items
+                           for routing.
+
+     FR-                   The system shall apply a price                              M           An order created before a price
+     MENU-08               change only to orders created                                           change keeps its original line prices.
+                           after it.
+
+
+
+  5.3 Orders (ORD)
+
+     ID                 Requirement                                                          Pri     Acceptance criteria
+
+     FR-                The Cashier and Manager shall                                        M       A valid request returns 201 with
+     ORD-01             create an order with an order type                                           order number, token and totals.
+                        (DINE_IN, TAKEAWAY, DELIVERY),
+                        one or more lines (item, quantity 1 to
+                        50, selected modifiers) and an
+                        optional note of up to 200
+                        characters.
+
+     FR-                The system shall validate every                                      M       A request with an inactive item
+     ORD-02             order and return all validation errors                                       and an invalid quantity returns
+                        together, each with its field path.                                          one 422 listing both.
+
+
+
+
+                                                                                                                                     Page 9 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID                 Requirement                                                          Pri   Acceptance criteria
+
+     FR-                The system shall calculate line                                      M     Test vectors with modifiers and
+     ORD-03             totals, GST per line and the order                                         mixed GST rates match hand-
+                        total using BR-02 and BR-03 and                                            calculated values to the paisa.
+                        return the breakdown.
+
+     FR-                The system shall generate a token                                    M     1,000 concurrent creations yield
+     ORD-04             (BR-01) and a unique, human-                                               unique tokens within the business
+                        readable order number.                                                     day.
+
+     FR-                The system shall enforce the order                                   M     One test per illegal transition
+     ORD-05             lifecycle in section 6.1 and reject                                        passes.
+                        every other transition with 409
+                        INVALID_TRANSITION.
+
+     FR-                The Cashier and Manager shall edit                                   M     After payment, an edit returns
+     ORD-06             an order's lines or note while it is                                       409.
+                        CREATED; edits shall recalculate
+                        totals and adjust stock.
+
+     FR-                The system shall cancel an order                                     M     A cancel without a reason returns
+     ORD-07             under BR-05 with a mandatory                                               422; open tickets become
+                        reason code, cancel its open tickets                                       CANCELLED.
+                        and handle stock under BR-12.
+
+     FR-                The Cashier and Manager shall mark                                   M     Marking an IN_KITCHEN order
+     ORD-08             a READY order COMPLETED when                                               COMPLETED returns 409.
+                        it is handed over.
+
+     FR-                The system shall search orders by                                    M     Result counts match the filters on
+     ORD-09             status, date range, token, order                                           a 10,000-order dataset; p95 under
+                        number and type with pagination                                            300 ms.
+                        (default 20, maximum 100) and
+                        newest-first sorting.
+
+     FR-                The system should make order                                         S     50 concurrent identical requests
+     ORD-10             creation idempotent through an                                             produce one order and identical
+                        Idempotency-Key header (BR-15).                                            responses.
+
+     FR-                The Manager shall flag or unflag an                                  S     A flagged order sorts first on
+     ORD-11             open order as RUSH.                                                        every station queue.
+
+
+
+
+                                                                                                                                     Page 10 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID                 Requirement                                                          Pri    Acceptance criteria
+
+     FR-                The system should cancel orders left                                 S      After the timeout the order is
+     ORD-12             unpaid in CREATED longer than a                                             CANCELLED with reason
+                        configured timeout (default 15                                              UNPAID_TIMEOUT and an audit
+                        minutes) and restore their stock.                                           record.
+
+
+
+  5.4 Payments (PAY)
+
+     ID              Requirement                                               Pri           Acceptance criteria
+
+     FR-             The Cashier and Manager shall                             M             Success returns 201 and the order
+     PAY-01          record a payment for a                                                  moves to PAID.
+                     CREATED order with method
+                     (CASH, UPI, CARD), amount
+                     and an optional reference of up
+                     to 64 characters.
+
+     FR-             On successful payment the                                 M             A fault injected during ticket creation
+     PAY-            system shall create the kitchen                                         leaves the order CREATED and no
+     02              tickets and move the order to                                           payment stored.
+                     IN_KITCHEN in the same
+                     database transaction.
+
+     FR-             The system shall allow exactly                            M             Two concurrent payment requests give
+     PAY-            one successful payment per                                              one 201 and one 409
+     03              order.                                                                  PAYMENT_ALREADY_RECORDED; a
+                                                                                             unique constraint exists in the database.
+
+     FR-             The system shall reject a                                 M             422 AMOUNT_MISMATCH and no state
+     PAY-            payment whose amount differs                                            change.
+     04              from the order total.
+
+     FR-             The system shall return a bill                            M             Bill totals equal order totals; GST per rate
+     PAY-            with items, modifiers, GST                                              sums correctly.
+     05              breakdown, total, token, order
+                     number, time and payment
+                     method.
+
+     FR-             For cash payments the system                              S             Tendered below the total returns 422;
+     PAY-            should accept the tendered                                              change equals tendered minus total.
+     06              amount and return the change.
+
+
+
+
+                                                                                                                                    Page 11 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID              Requirement                                               Pri           Acceptance criteria
+
+     FR-             The system should record a                                S             Cancelling an IN_KITCHEN order creates
+     PAY-            refund entry (status                                                    one refund entry for the paid amount.
+     07              REFUND_PENDING) when a
+                     paid order is cancelled.
+
+     FR-             The system may render the bill                            C             PDF totals match the JSON bill.
+     PAY-            as a printable PDF.
+     08
+
+
+
+  5.5 Kitchen display (KDS)
+
+     ID                 Requirement                                                   Pri       Acceptance criteria
+
+     FR-                When an order enters                                          M         An order with fries and a burger
+     KDS-01             IN_KITCHEN the system shall                                             creates tickets for the Fry and Grill
+                        create one ticket per station                                           stations, each with only its own
+                        involved, holding the items,                                            items.
+                        quantities, modifiers, note, token,
+                        order type, rush flag and creation
+                        time.
+
+     FR-                A station screen shall list that                              M         Tickets reorder when rush is set;
+     KDS-02             station's open tickets (NEW and                                         colour changes at 80 and 100 percent
+                        IN_PROGRESS) in the order of                                            of the target time.
+                        BR-10, with an age timer and the
+                        colour of BR-11.
+
+     FR-                A Kitchen user shall START a NEW                              M         Bumping a NEW ticket returns 409
+     KDS-03             ticket and BUMP an                                                      INVALID_TRANSITION (see OI-01).
+                        IN_PROGRESS ticket at a station
+                        they are bound to; a Manager may
+                        do so at any station.
+
+     FR-                A Kitchen user or Manager shall                               M         A recall after the window, or after
+     KDS-04             RECALL a DONE ticket within the                                         the order is COMPLETED, returns
+                        recall window (BR-17); the ticket                                       409.
+                        returns to IN_PROGRESS.
+
+
+
+
+                                                                                                                                  Page 12 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID                 Requirement                                                   Pri    Acceptance criteria
+
+     FR-                The system shall push ticket                                  M      A new ticket appears within 1 s at
+     KDS-05             creation, change and cancellation                                    p95; after a forced disconnect the
+                        to subscribed station screens in                                     screen shows all current tickets
+                        real time using server-sent                                          within 3 s.
+                        events, and a reconnecting
+                        screen shall reload the full current
+                        state.
+
+     FR-                The system shall set an order to                              M      Two concurrent bumps of an order's
+     KDS-06             READY exactly once, in the same                                      last two tickets produce one READY
+                        transaction as the bump of its last                                  transition and one audit record.
+                        open ticket (BR-06).
+
+     FR-                The system shall detect two users                             M      A two-thread test shows exactly one
+     KDS-07             changing the same ticket                                             success.
+                        concurrently, accept one change
+                        and reject the other with 409
+                        STALE_VERSION and the current
+                        ticket state.
+
+     FR-                When an order is cancelled the                                M      The notice appears on every
+     KDS-08             system shall remove its open                                         affected station and clears on
+                        tickets from station queues and                                      acknowledgement.
+                        show a CANCELLED notice until a
+                        user acknowledges it.
+
+     FR-                The manager board shall show                                  M      A ticket past target appears in the
+     KDS-09             every open order with the status                                     late list within 5 s.
+                        of each of its tickets and list
+                        tickets that are past their target
+                        time.
+
+     FR-                The system should show a distinct                             S      Rush tickets are visually distinct and
+     KDS-10             rush marker on rush tickets.                                         sort first.
+
+
+
+
+                                                                                                                              Page 13 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  5.6 Status board (BRD)
+
+     ID                  Requirement                                                     Pri       Acceptance criteria
+
+     FR-BRD-             The system shall provide a public,                              M         The board needs no login and
+     01                  read-only status board that lists                                         shows no names, items or
+                         token numbers in two groups:                                              amounts.
+                         PREPARING (order IN_KITCHEN)
+                         and READY.
+
+     FR-BRD-             The board shall update within 2                                 M         A bump that makes an order
+     02                  seconds of a status change, using                                         READY moves its token to READY
+                         server-sent events with polling as a                                      within 2 s.
+                         fallback.
+
+     FR-BRD-             The board shall remove a token                                  M         Tokens of completed and
+     03                  when its order becomes                                                    cancelled orders are not shown.
+                         COMPLETED or CANCELLED.
+
+     FR-BRD-             The board should highlight tokens                               S         A token READY for 6 minutes is
+     04                  that have been READY longer than                                          highlighted.
+                         a configured time (default 5
+                         minutes).
+
+
+
+  5.7 Inventory-lite (INV)
+
+     ID                Requirement                                                           Pri   Acceptance criteria
+
+     FR-INV-           The Admin should enable stock                                         S     Items without tracking are never
+     01                tracking per item and set a quantity                                        blocked by stock.
+                       (integer, 0 or more).
+
+     FR-INV-           At order creation the system should                                   S     100 concurrent orders for an item
+     02                reserve stock for all tracked items                                         with stock 10 succeed exactly 10
+                       atomically; if any item lacks stock,                                        times and stock never goes below
+                       nothing is reserved and the request                                         zero.
+                       fails with 409 OUT_OF_STOCK
+                       listing the items.
+
+
+
+
+                                                                                                                                  Page 14 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID                Requirement                                                           Pri    Acceptance criteria
+
+     FR-INV-           The system should mark an item                                        S      The POS menu shows the item
+     03                unavailable when its stock reaches                                           unavailable within 1 s of the last
+                       zero and available again when stock                                          unit being reserved.
+                       is added.
+
+     FR-INV-           The system should restore reserved                                    S      Stock after the cancel equals
+     04                stock when an order is cancelled                                             stock before the order.
+                       while CREATED (BR-12).
+
+     FR-INV-           The Manager and Admin should                                          S      An adjustment without a reason
+     05                adjust stock with a mandatory                                                returns 422; every adjustment is
+                       reason.                                                                      audited.
+
+
+
+  5.8 Reporting (RPT)
+
+     ID                Requirement                                                      Pri        Acceptance criteria
+
+     FR-RPT-           The Manager and Admin shall                                      M          Totals equal the sum of paid, non-
+     01                obtain a sales summary for a                                                cancelled orders computed
+                       business day or date range: order                                           independently in a test.
+                       count, gross amount, GST and total,
+                       grouped by payment method and
+                       order type.
+
+     FR-RPT-           The system shall report the top N                                M          Ranking matches ground truth on
+     02                items by quantity and by revenue                                            seeded data; ties are broken by
+                       for a date range.                                                           name.
+
+     FR-RPT-           The system shall report                                          M          Values match an independent
+     03                preparation time per station and                                            calculation on seeded timestamps.
+                       per item (average, median, 90th
+                       percentile) and the share of tickets
+                       that exceeded their target.
+
+     FR-RPT-           The system should report orders                                  S          The 24 hourly buckets sum to the
+     04                per hour of day for a date range.                                           total order count.
+
+     FR-RPT-           The system should report                                         S          Counts match the audit records.
+     05                cancelled orders grouped by
+                       reason and by the cancelling role.
+
+
+
+
+                                                                                                                                    Page 15 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID                Requirement                                                      Pri    Acceptance criteria
+
+     FR-RPT-           All reports shall be computed in                                 M      A range over 92 days returns 422;
+     06                the database with SQL                                                   the query plans are reviewed and
+                       aggregation, not in application                                         use indexes.
+                       memory, and accept a date range
+                       of at most 92 days.
+
+     FR-RPT-           The system may export any report                                 C      Exported rows equal the on-screen
+     07                as CSV.                                                                 rows.
+
+
+
+  5.9 Audit (AUD)
+
+     ID                  Requirement                                                     Pri   Acceptance criteria
+
+     FR-AUD-             The system shall record, for each                               M     A walk through AT-01 produces one
+     01                  state change, payment,                                                audit record per transition with
+                         cancellation, price change,                                           the correct actor.
+                         availability change, stock
+                         adjustment and user or role
+                         change: actor, role, time, entity
+                         type and id, action, previous and
+                         new state, and the reason where
+                         given.
+
+     FR-AUD-             Audit records shall be append-                                  M     An update or delete attempted
+     02                  only: the API offers no update or                                     through SQL as the application
+                         delete, and the application's                                         user fails.
+                         database user has no update or
+                         delete permission on the audit
+                         table.
+
+     FR-AUD-             The Manager and Admin shall                                     M     Filters combine correctly; p95
+     03                  search the audit log by entity,                                       under 300 ms with 500,000
+                         actor, action and date range with                                     records.
+                         pagination.
+
+     FR-AUD-             The system shall write the audit                                M     If the audit write is forced to fail,
+     04                  record in the same transaction as                                     the business change is rolled back.
+                         the change it describes.
+
+
+
+
+                                                                                                                                Page 16 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  5.10 Configuration and seed data (CFG)
+
+     ID                  Requirement                                                     Pri   Acceptance criteria
+
+     FR-CFG-             The Admin shall configure stations,                             M     A changed value takes effect for
+     01                  GST rates, colour thresholds (BR-                                     new operations without a restart.
+                         11), recall window, business-day
+                         cutoff and unpaid-order timeout.
+
+     FR-CFG-             The system shall load seed data                                 M     On an empty database the
+     02                  with one command: at least 5                                          command produces a ready demo
+                         categories, 30 items with modifiers,                                  in under 60 seconds.
+                         4 stations and one user per role.
+
+     FR-CFG-             The system should provide a                                     S     Reports and list endpoints run
+     03                  repeatable script that generates                                      against the generated dataset.
+                         100,000 synthetic historical orders
+                         for performance testing.
+
+
+
+  5.11 Platform (SYS)
+
+     ID                Requirement                                                       Pri   Acceptance criteria
+
+     FR-SYS-           The API shall be versioned under                                  M     Every error response in the test
+     01                /api/v1, use JSON and return every                                      suite matches the schema.
+                       error in one consistent envelope
+                       (section 10).
+
+     FR-SYS-           The system shall generate OpenAPI                                 M     Every endpoint appears with
+     02                documentation from the code and                                         request, response and error
+                       serve an interactive page.                                              examples.
+
+     FR-SYS-           List endpoints shall support                                      M     A contract test checks the shared
+     03                pagination, sorting and filtering                                       parameters on all list endpoints.
+                       with the same parameter names
+                       everywhere.
+
+     FR-SYS-           The system shall assign a                                         M     A request can be traced across the
+     04                correlation ID to every request,                                        logs by its ID.
+                       return it in a response header and
+                       include it in every log line.
+
+
+
+
+                                                                                                                                Page 17 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID                Requirement                                                       Pri       Acceptance criteria
+
+     FR-SYS-           The system shall expose a public                                  M         Health reports database
+     05                health endpoint and an Admin-only                                           connectivity.
+                       metrics endpoint.
+
+
+
+
+  6. State models
+
+  6.1 Order lifecycle
+
+     From                      To                          Trigger                           Who                Guard
+
+     (none)                    CREATED                     Create order                      Cashier,           Items valid and
+                                                                                             Manager            available; stock
+                                                                                                                reserved
+
+     CREATED                   PAID                        Record                            Cashier,           Amount equals total;
+                                                           payment                           Manager            no earlier payment
+
+     PAID                      IN_KITCHEN                  Automatic                         System             Tickets created in
+                                                                                                                the same transaction
+
+     IN_KITCHEN                READY                       Last ticket                       System             All non-cancelled
+                                                           becomes DONE                                         tickets DONE
+
+     READY                     IN_KITCHEN                  A ticket is                       Kitchen (own       Inside the recall
+                                                           recalled                          station),          window
+                                                                                             Manager
+
+     READY                     COMPLETED                   Hand over                         Cashier,           None
+                                                                                             Manager
+
+     CREATED                   CANCELLED                   Cancel                            Cashier,           Reason required;
+                                                                                             Manager            stock restored
+
+     CREATED                   CANCELLED                   Unpaid timeout                    System             Timeout elapsed
+                                                                                                                (FR-ORD-12)
+
+     IN_KITCHEN                CANCELLED                   Cancel                            Manager            Reason required;
+                                                                                                                open tickets
+                                                                                                                cancelled
+
+
+
+
+                                                                                                                                    Page 18 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  Every other combination is illegal and returns 409 INVALID_TRANSITION. COMPLETED
+  and CANCELLED are final states.
+
+
+  6.2 Ticket lifecycle
+
+     From                            To                            Trigger                   Who            Guard
+
+     (none)                          NEW                           Order enters              System         None
+                                                                   IN_KITCHEN
+
+     NEW                             IN_PROGRESS                   Start                     Kitchen (own   None
+                                                                                             station),
+                                                                                             Manager
+
+     IN_PROGRESS                     DONE                          Bump                      Kitchen (own   None
+                                                                                             station),
+                                                                                             Manager
+
+     DONE                            IN_PROGRESS                   Recall                    Kitchen (own   Inside the recall
+                                                                                             station),      window; order not
+                                                                                             Manager        COMPLETED
+
+     NEW or                          CANCELLED                     Order                     System         None
+     IN_PROGRESS                                                   cancelled
+
+
+  Every ticket carries a version number that changes on each update; it is the basis of FR-
+  KDS-07.
+
+
+  7. External interface requirements
+
+  7.1 User interfaces
+
+     Screen                                     Users                            Key content
+
+     Login                                      All staff                        Username, password, clear error messages
+
+     POS order entry                            Cashier,                         Category tabs, item search, modifiers, running
+                                                Manager                          total with GST, note, order type
+
+     Payment and bill                           Cashier,                         Method, amount, change, bill view
+                                                Manager
+
+
+
+
+                                                                                                                           Page 19 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Screen                                     Users                            Key content
+
+     Order list                                 Cashier,                         Search and filters, status, open an order
+                                                Manager
+
+     Station board                              Kitchen                          Open tickets, timers and colours, start, bump,
+                                                                                 recall, cancelled notices
+
+     Manager board                              Manager                          All orders with per-station status, late list, rush
+                                                                                 toggle, cancel
+
+     Status board                               Public                           PREPARING and READY token columns, full-
+                                                                                 screen mode
+
+     Menu admin                                 Admin                            Categories, items, modifiers, stations,
+                                                                                 availability, stock
+
+     Configuration and                          Admin                            Thresholds, GST rates, users and roles
+     users
+
+     Reports                                    Manager, Admin                   Date range controls, tables, simple charts
+
+     Audit log                                  Manager, Admin                   Search and filters
+
+
+
+  7.2 API interfaces (indicative; the final contract is document 5)
+
+     Resource             Endpoints                                                               Notes
+
+     Auth                 POST /api/v1/auth/login, POST                                           Bearer token afterwards
+                          /api/v1/auth/refresh
+
+     Menu                 GET /api/v1/menu, PATCH
+                          /api/v1/items/{id}/availability, admin CRUD
+                          under /api/v1/admin
+
+     Orders               POST /api/v1/orders, GET /api/v1/orders, GET                            Idempotency-Key on creation
+                          and PUT /api/v1/orders/{id}, POST
+                          /api/v1/orders/{id}/cancel, POST
+                          /api/v1/orders/{id}/complete, PATCH
+                          /api/v1/orders/{id}/rush
+
+     Payments             POST /api/v1/orders/{id}/payments, GET
+                          /api/v1/orders/{id}/bill
+
+
+
+
+                                                                                                                               Page 20 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Resource             Endpoints                                                          Notes
+
+     Tickets              GET /api/v1/stations/{id}/tickets, POST                            Version required on updates
+                          /api/v1/tickets/{id}/start, bump and recall
+
+     Streams              GET /api/v1/stream/stations/{id}, GET                              text/event-stream
+                          /api/v1/stream/board
+
+     Board                GET /api/v1/board                                                  Snapshot for first load and
+                                                                                             reconnect
+
+     Inventory            PATCH /api/v1/items/{id}/stock
+
+     Reports              GET /api/v1/reports/sales, top-items, prep-
+                          times, hourly, cancellations
+
+     Audit                GET /api/v1/audit
+
+     Admin                /api/v1/admin/users, stations, config
+
+     Health               GET /actuator/health                                               Public
+
+
+
+  7.3 Software interfaces
+        Relational database through JDBC (PostgreSQL 15 or newer by default).
+        Docker and Docker Compose for packaging; GitHub Actions for continuous integration.
+
+
+  7.4 Hardware interfaces
+  No special hardware. Any device with a current browser works; touchscreen tablets are
+  recommended for stations.
+
+
+  7.5 Communication interfaces
+        HTTP with JSON bodies; server-sent events as long-lived GET requests with automatic
+        client reconnect.
+        HTTPS outside local development.
+        Ticket age is computed from server-provided timestamps, so screens show correct
+        timers even when device clocks differ.
+
+
+
+
+                                                                                                                           Page 21 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  8. Non-functional requirements
+  Reference environment for performance targets: a laptop-class machine with 4 cores and
+  8 GB RAM, application and database on the same machine.
+
+
+     ID                          Requirement                                                 Verification
+
+     NFR-PERF-01                 Order creation, including pricing and stock                 T: load test
+                                 reservation, completes within 300 ms at
+                                 p95 under 50 concurrent users with 100,000
+                                 orders in the database.
+
+     NFR-PERF-                   A new ticket appears on a connected                         T: timestamp comparison
+     02                          station screen within 1 s at p95 after the
+                                 payment transaction commits, with 10
+                                 screens connected.
+
+     NFR-PERF-                   List and search endpoints respond within                    T: load test
+     03                          300 ms at p95 with 100,000 orders.
+
+     NFR-PERF-                   Each report responds within 2 s at p95 over                 T: load test and query-plan
+     04                          a 31-day range with 100,000 orders.                         review
+
+     NFR-CONC-                   50 concurrent identical idempotent create                   T
+     01                          requests create exactly one order.
+
+     NFR-CONC-                   100 concurrent orders for an item with                      T
+     02                          stock 10 succeed exactly 10 times; stock
+                                 never goes below zero.
+
+     NFR-CONC-                   Two concurrent updates to one ticket: one                   T
+     03                          succeeds, the other returns 409
+                                 STALE_VERSION, and the ticket stays in a
+                                 valid state.
+
+     NFR-CONC-                   Concurrent bumps of the last two tickets of                 T
+     04                          one order produce exactly one READY
+                                 transition.
+
+     NFR-SEC-01                  Tokens are signed with a key supplied                       I
+                                 through the environment, never committed,
+                                 and expire after 15 minutes.
+
+
+
+
+                                                                                                                     Page 22 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID                          Requirement                                                 Verification
+
+     NFR-SEC-02                  All input is validated on the server; every                 T and I
+                                 query is parameterised and no SQL is built
+                                 from user text.
+
+     NFR-SEC-03                  CORS is limited to configured origins,                      I
+                                 standard security headers are set, and
+                                 HTTPS is required outside local
+                                 development.
+
+     NFR-SEC-04                  The system collects no customer personal                    I
+                                 data; staff data is limited to username, role
+                                 and password hash.
+
+     NFR-SEC-05                  A review against the OWASP Top 10 is                        I
+                                 completed and its findings are logged.
+
+     NFR-REL-01                  State-changing operations are atomic; a                     T: fault injection
+                                 failure leaves no partial state.
+
+     NFR-REL-02                  After an application restart no committed                   D
+                                 data is lost and station screens reconnect
+                                 and reload within 3 s.
+
+     NFR-REL-03                  Schema changes are applied only through                     I
+                                 versioned migrations.
+
+     NFR-USE-01                  Station and board text is readable from 1.5                 I
+                                 m: item names at least 24 px, status shown
+                                 by text and icon as well as colour, touch
+                                 targets at least 44 px.
+
+     NFR-USE-02                  A person new to the POS screen enters a 3-                  D: test with 3 people
+                                 item order and records payment within 60
+                                 seconds after a 5-minute walkthrough.
+
+     NFR-MNT-01                  Code is packaged by feature and                             T
+                                 controllers never access repositories
+                                 directly; an automated architecture test
+                                 enforces this.
+
+     NFR-MNT-02                  Line coverage is at least 70 percent on                     T
+                                 service and domain layers, and the build
+                                 fails below it.
+
+
+
+
+                                                                                                                     Page 23 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID                          Requirement                                                 Verification
+
+     NFR-MNT-03                  Static analysis and formatting checks run in                I
+                                 CI and must pass.
+
+     NFR-OBS-01                  Logs are structured and carry the                           I
+                                 correlation ID and order number on every
+                                 order-related line.
+
+     NFR-OBS-02                  Metrics include orders created, ticket cycle                I
+                                 time, open stream connections and error
+                                 count.
+
+     NFR-POR-01                  One docker compose command starts the                       D
+                                 application and database with seed data on
+                                 Windows, Linux and macOS.
+
+     NFR-DOC-01                  The README documents how to run, test                       I
+                                 and demo the system, and the API
+                                 documentation is generated, not hand-
+                                 written.
+
+
+
+
+  9. Data requirements
+  This is the logical view; tables, types and indexes are finalised in document 4.
+
+
+     Entity                                          Key attributes                              Notes
+
+     User                                            id, username, password hash, role,          Kitchen users linked to
+                                                     active                                      stations
+
+     Station                                         id, name, active                            Default: Fry, Grill,
+                                                                                                 Assembly, Beverage
+
+     Category                                        id, name, display order, GST rate,
+                                                     active
+
+     MenuItem                                        id, name, description, category,            Linked to one or more
+                                                     base price, target prep seconds,            stations
+                                                     active, available, tracked stock,
+                                                     stock quantity
+
+
+
+
+                                                                                                                        Page 24 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Entity                                          Key attributes                          Notes
+
+     ModifierGroup, Modifier                         group: item, name, selection type,
+                                                     min, max; option: name, price
+                                                     change
+
+     Combo, ComboItem                                combo: name, price; component:
+     (Should)                                        item, quantity
+
+     Order                                           id, order number, token, business       Unique per business day
+                                                     day, type, status, rush flag, note,     and token
+                                                     subtotal, GST total, total, version,
+                                                     created and updated times,
+                                                     creator
+
+     OrderLine                                       id, order, item or combo, name          Snapshots protect history
+                                                     snapshot, unit price snapshot,
+                                                     GST rate snapshot, quantity, line
+                                                     GST, line total
+
+     OrderLineModifier                               line, modifier name snapshot,
+                                                     price change snapshot
+
+     Ticket                                          id, order, station, status, version,
+                                                     created, started and done times,
+                                                     target seconds
+
+     TicketItem                                      ticket, order line, quantity
+
+     Payment                                         id, order, method, amount,              One per order
+                                                     reference, tendered amount,
+                                                     status, time, recorded by
+
+     Refund (Should)                                 id, payment, amount, status,
+                                                     reason
+
+     StockAdjustment                                 id, item, change, reason, actor,
+     (Should)                                        time
+
+     AuditEvent                                      id, time, actor, role, entity type,     Append-only
+                                                     entity id, action, previous state,
+                                                     new state, reason, correlation id
+
+     IdempotencyRecord                               key, request hash, stored               Expires after 24 hours
+     (Should)                                        response, created time
+
+
+
+
+                                                                                                                  Page 25 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Entity                                          Key attributes                          Notes
+
+     Config                                          key, value                              Admin-managed settings
+
+
+
+     ID              Data rule
+
+     DR-01           Money columns use fixed-point decimals (for
+                     example DECIMAL(12,2)); no floating-point types.
+
+     DR-02           Timestamps are stored in UTC.
+
+     DR-03           Every relationship has a foreign key. Check
+                     constraints enforce quantity 1 to 50, price above 0
+                     and stock of 0 or more.
+
+     DR-04           Unique constraints: token per business day, order
+                     number, one payment per order, idempotency key.
+
+     DR-05           Menu items and users that are referenced are
+                     deactivated, never deleted.
+
+     DR-06           Names and prices on order lines are snapshots, not
+                     references to live menu values.
+
+     DR-07           Indexes are planned for orders by status and time,
+                     orders by business day, tickets by station and
+                     status, and audit by entity and time; each is
+                     justified with an EXPLAIN plan in document 4.
+
+     DR-08           Volume basis: 1,500 orders per day, about 8 audit
+                     records per order; the performance dataset has
+                     100,000 orders.
+
+     DR-09           Orders and audit records are kept for at least 12
+                     months in the demo environment; version 1 deletes
+                     nothing.
+
+
+
+
+  10. Validation and error handling
+  Every error response uses one envelope: timestamp, status, code, message, path,
+  correlationId and an errors list of field path and message. Rules: no stack traces or internal
+  details in responses; wrong username and wrong password give the same message;
+
+
+
+                                                                                                               Page 26 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  validation returns all errors at once.
+
+
+     Code                                                           HTTP          When
+
+     MALFORMED_REQUEST                                              400           Body cannot be parsed or has the wrong
+                                                                                  types
+
+     UNAUTHENTICATED                                                401           Missing, invalid or expired token; failed login
+
+     FORBIDDEN                                                      403           Role or station not permitted
+
+     NOT_FOUND                                                      404           Unknown id
+
+     INVALID_TRANSITION                                             409           Illegal order or ticket transition
+
+     STALE_VERSION                                                  409           Concurrent update lost
+
+     OUT_OF_STOCK                                                   409           Insufficient stock
+
+     PAYMENT_ALREADY_RECORDED                                       409           Second payment on an order
+
+     VALIDATION_FAILED                                              422           One or more field rules violated
+
+     ITEM_UNAVAILABLE                                               422           Unavailable or inactive item in an order
+
+     AMOUNT_MISMATCH                                                422           Payment amount differs from the order total
+
+     IDEMPOTENCY_KEY_REUSED                                         422           Same key with a different payload
+
+     RATE_LIMITED                                                   429           Login lockout or throttling
+
+     INTERNAL_ERROR                                                 500           Unexpected failure; generic message, details
+                                                                                  only in the logs
+
+
+
+
+  11. Constraints, assumptions and dependencies
+  Assumptions
+
+        A-01: one outlet and one time zone (Asia/Kolkata).
+        A-02: menu prices are exclusive of GST (open issue OI-05).
+        A-03: payments are simulated; no money moves.
+        A-04: the server and all screens share a stable local network.
+        A-05: four stations by default (Fry, Grill, Assembly, Beverage), configurable by the
+        Admin.
+
+
+
+                                                                                                                              Page 27 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+        A-06: staff are trained on the screens; one Manager is on shift at a time.
+
+  Dependencies: a JDK, a PostgreSQL instance, Docker, a current browser and a CI service.
+  There are no external APIs.
+
+  Change control: any change to a Must requirement is recorded in the revision history
+  with its reason, and the affected tests in document 7 are updated in the same change.
+
+
+  12. Verification and traceability
+
+  12.1 Traceability to product goals
+
+     Goal (document 1)                                                  Requirements
+
+     G1 Correctness under rush                                          FR-ORD-10, FR-PAY-03, FR-KDS-06, FR-KDS-07, FR-
+                                                                        INV-02, NFR-CONC-01 to 04
+
+     G2 Real-time visibility                                            FR-KDS-05, FR-BRD-02, NFR-PERF-02, NFR-REL-
+                                                                        02
+
+     G3 Lifecycle and audit                                             FR-ORD-05, FR-KDS-03, FR-KDS-04, FR-AUD-01 to
+                                                                        04, BR-05, BR-06, BR-13, sections 6.1 and 6.2
+
+     G4 Measurable kitchen performance                                  FR-RPT-01 to 06, NFR-PERF-04
+
+     G5 Easy to run and demonstrate                                     FR-CFG-02, FR-CFG-03, NFR-POR-01, NFR-DOC-01
+
+     G6 Defensible engineering                                          NFR-SEC-01 to 05, NFR-MNT-01 to 03, NFR-OBS-01
+                                                                        and 02, FR-SYS-01 to 05
+
+
+
+  12.2 Acceptance scenarios
+
+     ID          Scenario                                          Expected result                  Covers
+
+     AT-         Cashier creates a 3-item                          Order COMPLETED; token           FR-ORD-01 to 05, FR-
+     01          order with a modifier and                         moved from PREPARING to          PAY-01 and 02, FR-
+                 pays by UPI; Fry and Grill                        READY and then off the           KDS-01 to 06, FR-BRD-
+                 tickets appear; cooks                             board; bill correct; one audit   01 to 03, FR-AUD-01
+                 start and bump; the order                         record per transition
+                 is handed over
+
+
+
+
+                                                                                                                     Page 28 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     ID          Scenario                                          Expected result                 Covers
+
+     AT-         Submit an order with an                           One 422 listing both errors;    FR-ORD-02, FR-
+     02          unavailable item and                              no order created                MENU-04
+                 quantity 0
+
+     AT-         Send the same create                              One order and 50 identical      FR-ORD-10
+     03          request 50 times                                  responses
+                 concurrently with one key
+
+     AT-         100 concurrent orders for                         Exactly 10 succeed; stock is    FR-INV-02, FR-INV-03
+     04          an item with stock 10                             0; the item shows unavailable
+
+     AT-         Two users bump the same                           One succeeds; the other         FR-KDS-07
+     05          ticket at once                                    gets 409 STALE_VERSION
+
+     AT-         Bump the last ticket, then                        Order goes READY, then          FR-KDS-04, BR-06
+     06          recall it inside the window                       back to IN_KITCHEN; board
+                                                                   follows
+
+     AT-         Cashier cancels a                                 Allowed; 403; allowed with      FR-ORD-07, BR-05
+     07          CREATED order; cashier                            reason; 409
+                 tries to cancel an
+                 IN_KITCHEN order;
+                 Manager cancels it;
+                 Manager tries a READY
+                 order
+
+     AT-         Each role calls every                             401 or 403 every time           FR-AUTH-03, FR-
+     08          endpoint it should not                                                            AUTH-04
+                 reach
+
+     AT-         Cut a station screen's                            After reconnect the screen      FR-KDS-05
+     09          connection for 30 seconds                         shows all current tickets
+                 while orders arrive                               within 3 s
+
+     AT-         Run every report on the                           Figures equal independent       FR-RPT-01 to 06
+     10          seeded dataset                                    SQL ground truth
+
+     AT-         Force an error during                             Order stays CREATED; no         FR-PAY-02, NFR-REL-
+     11          ticket creation after                             payment and no partial          01
+                 payment                                           tickets
+
+
+  Every requirement receives at least one test case ID in document 7.
+
+
+
+
+                                                                                                                      Page 29 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  13. Learning map for the developer
+  The SRS is written to be complete, not trimmed to current skill. This map lists what you
+  need to learn to implement it, with the requirements each topic unlocks. Core topics are
+  needed for the Must list; Stretch topics add depth for the Should list and interviews.
+
+  How to learn each topic: read or watch, build a one-hour throwaway spike, explain the
+  trade-off in two sentences, then apply it in the project and write a test. A topic is learned
+  when you can redo the spike without a tutorial and explain why you chose it. Learn a topic
+  when its phase starts, not all at once.
+
+
+     Topic                             Needed for                         What to be able to do            Level   Phase
+
+     Java essentials                   Everything                         Classes, interfaces, enums       Core    0-1
+                                                                          with behaviour, records,
+                                                                          generics, collections,
+                                                                          streams, Optional,
+                                                                          exceptions, immutability
+
+     Money and time                    BR-02, BR-03, BR-                  BigDecimal with scale and        Core    1
+     in Java                           16, BR-18                          RoundingMode.HALF_UP
+                                                                          (never double); java.time with
+                                                                          Instant and ZoneId
+                                                                          Asia/Kolkata
+
+     Spring Boot                       All FR                             Dependency injection,            Core    1
+     fundamentals                                                         configuration properties and
+                                                                          profiles, REST controllers,
+                                                                          Bean Validation, global error
+                                                                          handling with
+                                                                          @ControllerAdvice
+
+     SQL and                           Section 9, RPT                     Primary and foreign keys,        Core    0-3
+     relational design                                                    unique and check
+                                                                          constraints, 3NF, indexes,
+                                                                          joins, GROUP BY, window
+                                                                          functions, percentile
+                                                                          functions, CTEs, reading
+                                                                          EXPLAIN
+
+     Database                          NFR-REL-03                         Flyway versions and a            Core    0-1
+     migrations                                                           baseline strategy
+
+
+
+
+                                                                                                                       Page 30 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Topic                             Needed for                         What to be able to do            Level   Phase
+
+     JPA and                           Persistence                        Entity mapping,                  Core    1
+     Hibernate                                                            relationships, lazy versus
+                                                                          eager loading, the N+1
+                                                                          problem, fetch joins, DTO
+                                                                          projections, native queries
+
+     Transactions and                  FR-PAY-02, FR-                     ACID, @Transactional             Core    1-3
+     isolation                         AUD-04, NFR-                       propagation and rollback
+                                       REL-01                             rules, isolation levels and
+                                                                          what each prevents
+
+     State machine                     Sections 6.1 and                   Transition tables or the State   Core    1
+     design                            6.2                                pattern with enums, guard
+                                                                          conditions, a test for every
+                                                                          legal and illegal transition
+
+     Spring Security                   AUTH, NFR-SEC                      Authentication versus            Core    1
+     and JWT                                                              authorization, filter chain,
+                                                                          BCrypt, JWT structure and
+                                                                          validation, method security,
+                                                                          CORS, OWASP Top 10
+                                                                          (broken access control,
+                                                                          injection)
+
+     REST API design                   SYS, section 7                     Resource naming, status          Core    1
+     and OpenAPI                                                          codes, pagination, one error
+                                                                          envelope, springdoc
+
+     Concurrency                       FR-KDS-06 and                      Race conditions, optimistic      Core    2-3
+     control                           07, FR-PAY-03,                     locking with @Version,
+                                       FR-INV-02, NFR-                    pessimistic locks (SELECT
+                                       CONC                               FOR UPDATE), atomic
+                                                                          conditional UPDATE, unique
+                                                                          constraints as guards,
+                                                                          multithreaded tests with
+                                                                          ExecutorService and
+                                                                          CountDownLatch. This is the
+                                                                          hardest and most valuable
+                                                                          topic
+
+
+
+
+                                                                                                                       Page 31 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Topic                             Needed for                         What to be able to do           Level     Phase
+
+     Real-time with                    FR-KDS-05, BRD                     How SSE works, SseEmitter       Core      2
+     server-sent                                                          lifecycle (timeouts, errors,
+     events                                                               cleanup), event ids,
+                                                                          reconnect with full-state
+                                                                          resync, why SSE rather than
+                                                                          WebSocket here
+
+     Idempotency                       FR-ORD-10, BR-15                   Idempotency keys, request       Core      3
+     pattern                                                              hashing, storing and
+                                                                          replaying responses
+
+     Testing                           All T items, NFR-                  JUnit 5, AssertJ, Mockito,      Core      1-3
+                                       MNT                                Spring Boot test slices,
+                                                                          Testcontainers with
+                                                                          PostgreSQL, test data
+                                                                          builders, basic load testing
+                                                                          with k6
+
+     Docker and CI                     NFR-POR, NFR-                      Multi-stage Dockerfile,         Core      0-4
+                                       MNT-03                             Compose with environment
+                                                                          configuration, a GitHub
+                                                                          Actions workflow with build,
+                                                                          tests and a coverage gate
+
+     Observability                     NFR-OBS, FR-                       SLF4J and Logback,              Core      3
+                                       SYS-04                             structured logs, MDC for the
+                                                                          correlation id, Actuator and
+                                                                          Micrometer metrics
+
+     Frontend basics                   Section 7.1                        HTML, CSS, JavaScript fetch     Core      2 and
+                                                                          and EventSource, rendering                4
+                                                                          state; the framework is
+                                                                          chosen in document 3
+
+     Design                            NFR-MNT-01                         SOLID, package-by-feature,      Core      1-3
+     principles and                                                       Strategy for pricing and tax,   and
+     patterns                                                             domain events, Repository,      Stretch
+                                                                          DTO; an architecture test
+                                                                          with ArchUnit
+
+
+
+
+                                                                                                                        Page 32 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Topic                             Needed for                         What to be able to do           Level       Phase
+
+     Performance                       NFR-PERF                           Reading query plans, index      Stretch     3
+     tuning                                                               design, connection pool
+                                                                          sizing, measuring p95
+
+     Security                          FR-AUTH-06 and                     Rate limiting, refresh-token    Stretch     3
+     hardening extras                  07                                 rotation, secrets
+                                                                          management
+
+
+  If time runs short, cut Stretch topics and Should or Could requirements first. Do not cut
+  the Core concurrency topic or its tests: they are what separates this project from a CRUD
+  tutorial.
+
+
+  14. Open issues
+
+     ID            Question                                                                  Decide in
+
+     OI-01         Should BUMP be allowed directly from NEW (one                             Document 6, after UI
+                   tap in a busy kitchen)? Currently no.                                     wireframes
+
+     OI-           Client UI technology: server-rendered pages or a                          Document 3
+     02            small React app.
+
+     OI-03         Database: PostgreSQL (default) or MySQL.                                  Document 3
+
+     OI-           Confirm the default recall window (10 minutes)                            Document 6
+     04            and colour thresholds (80 and 100 percent)
+                   against a realistic kitchen routine.
+
+     OI-05         GST treatment: menu prices exclusive or                                   Before pricing tests are written
+                   inclusive of GST. The formula in BR-03 changes if
+                   inclusive.
+
+     OI-06         Does the DELIVERY order type need an address?                             Document 5
+                   Assumed no (label only).
+
+     OI-07         Your deadline and company assessment details;                             Roadmap review
+                   these shape the roadmap, not the requirements.
+
+
+
+
+                                                                                                                          Page 33 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+  15. Glossary
+
+     Term                               Meaning
+
+     QSR                                Quick service restaurant
+
+     KOT                                Kitchen order ticket, the paper slip the KDS
+                                        replaces
+
+     KDS                                Kitchen display system
+
+     Station                            A kitchen work area such as Fry or Grill
+
+     Ticket                             The part of an order handled by one station
+
+     Bump                               Mark a ticket done
+
+     Recall                             Undo a bump
+
+     86                                 Mark an item unavailable
+
+     RUSH                               Priority flag that moves an order to the front of
+                                        station queues
+
+     Token                              Short number the customer watches on the status
+                                        board
+
+     Business day                       Operating day starting at the configured cutoff
+                                        time
+
+     Idempotency                        Repeating a request has the same effect as
+                                        sending it once
+
+     Optimistic locking                 Detecting concurrent edits with a version number
+                                        instead of holding a lock
+
+     SSE                                Server-sent events, a one-way stream from server
+                                        to browser
+
+     JWT                                JSON Web Token, a signed token that carries the
+                                        user's identity and role
+
+     RBAC                               Role-based access control
+
+     p95                                The value under which 95 percent of
+                                        measurements fall
+
+
+
+
+                                                                                             Page 34 of 35
+Software Requirements Specification: KitchenFlow Restaurant Order & Kitchen Display System
+
+
+
+
+     Term                               Meaning
+
+     GST                                Goods and Services Tax
+
+
+
+
+  16. Revision history and next step
+
+     Version           Date                             Author           Change
+
+     0.1               28 October 2026                  Rathi            First draft
+
+
+  Next: document 3, System Architecture (HLD). It closes OI-02 and OI-03 and covers the
+  module structure, the SSE flow, transaction boundaries, the deployment view and the
+  main design decisions.
+
+
+
+
+                                                                                             Page 35 of 35
+
