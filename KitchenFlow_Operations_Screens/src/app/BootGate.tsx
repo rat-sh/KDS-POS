@@ -1,6 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react"
-import { checkBackend, loadStationConfigs } from "../api"
-import { setStationRegistry } from "../api/stationRegistry"
+import { checkBackend } from "../api"
 
 type BootState = {
   status: "checking" | "ready" | "error"
@@ -16,9 +15,7 @@ export function BootGate({ children }: { children: ReactNode }) {
     let active = true
     setState({ status: "checking", step: "Connecting to the Spring Boot API" })
     void checkBackend()
-      .then(() => loadStationConfigs())
-      .then((stations) => {
-        setStationRegistry(stations.map((s) => ({ id: Number(s.id), name: s.name })))
+      .then(() => {
         if (active) setState({ status: "ready", step: "Backend connected" })
       })
       .catch((error: unknown) => {
