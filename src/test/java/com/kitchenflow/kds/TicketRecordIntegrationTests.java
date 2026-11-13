@@ -4,8 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.kitchenflow.kds.common.security.ApiActor;
 import com.kitchenflow.kds.common.time.BusinessDayService;
+import com.kitchenflow.kds.common.error.ApiFailure;
 import com.kitchenflow.kds.order.api.OrderRequests.TicketRecord;
 import com.kitchenflow.kds.order.api.OrderRequests.ActionRequest;
+import com.kitchenflow.kds.order.api.OrderRequests.CancelRequest;
 import com.kitchenflow.kds.order.service.OrderService;
 import com.kitchenflow.kds.menu.service.CatalogService;
 import com.kitchenflow.kds.menu.api.MenuItemRequest;
@@ -17,6 +19,8 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -156,6 +160,62 @@ class TicketRecordIntegrationTests {
         assertThat(jdbc.queryForObject("SELECT status FROM kitchen_ticket WHERE id = ?", String.class, ticketId)).isEqualTo("IN_PROGRESS");
         assertThat(jdbc.queryForObject("SELECT recall_count FROM kitchen_ticket WHERE id = ?", Integer.class, ticketId)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT done_at FROM kitchen_ticket WHERE id = ?", Timestamp.class, ticketId)).isNull();
+    }
+
+    @Test
+    void concurrentCancelAndServeLeaveOrderAndTicketConsistent() throws Exception {
+        TestReferences references = insertTestStationAndCategory();
+        Long managerId = jdbc.queryForObject("SELECT id FROM app_user WHERE username = 'test-admin'", Long.class);
+        int token = 80000 + Math.floorMod(UUID.randomUUID().hashCode(), 19999);
+        Long orderId = jdbc.queryForObject("""
+                INSERT INTO order_header (order_number, business_date, token, order_type, status, created_by)
+                VALUES (?, ?, ?, 'TAKEAWAY', 'IN_KITCHEN', ?) RETURNING id
+                """, Long.class, "KF-TEST-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16), businessDays.currentBusinessDay(), token, managerId);
+        Long ticketId = jdbc.queryForObject("""
+                INSERT INTO kitchen_ticket (order_id, station_id, status, target_seconds, started_at, done_at)
+                VALUES (?, ?, 'DONE', 600, now() - interval '3 minutes', now()) RETURNING id
+                """, Long.class, orderId, references.stationId());
+        ApiActor manager = new ApiActor(managerId, "test-admin", "MANAGER", 0);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var cancel = executor.submit(() -> {
+                ready.countDown();
+                start.await();
+                try {
+                    orders.cancel(orderId, new CancelRequest("CUSTOMER_REQUEST", null, null), manager, "cancel-race");
+                    return "cancelled";
+                } catch (ApiFailure failure) {
+                    if (failure.status() == 409) return "conflict";
+                    throw failure;
+                }
+            });
+            var serve = executor.submit(() -> {
+                ready.countDown();
+                start.await();
+                try {
+                    orders.ticketAction(ticketId, "serve", new ActionRequest(null), manager, "serve-race");
+                    return "served";
+                } catch (ApiFailure failure) {
+                    if (failure.status() == 409) return "conflict";
+                    throw failure;
+                }
+            });
+            ready.await();
+            start.countDown();
+            cancel.get();
+            serve.get();
+        }
+
+        String orderStatus = jdbc.queryForObject("SELECT status FROM order_header WHERE id = ?", String.class, orderId);
+        String ticketStatus = jdbc.queryForObject("SELECT status FROM kitchen_ticket WHERE id = ?", String.class, ticketId);
+        if ("CANCELLED".equals(orderStatus)) {
+            assertThat(ticketStatus).isEqualTo("CANCELLED");
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM kitchen_ticket WHERE order_id = ? AND status <> 'CANCELLED'", Integer.class, orderId)).isZero();
+        } else {
+            assertThat(orderStatus).isEqualTo("READY");
+            assertThat(ticketStatus).isEqualTo("SERVED");
+        }
     }
 
     private TestReferences insertTestStationAndCategory() {

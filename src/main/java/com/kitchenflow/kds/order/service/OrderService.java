@@ -213,12 +213,13 @@ public class OrderService {
 
     @Transactional
     public void recordPayment(long orderId, PaymentRequest request, ApiActor actor, String correlationId) {
-        Map<String, Object> order = order(orderId);
+        OrderLock order = lockOrder(orderId);
         BigDecimal due = orderTotal(orderId);
         String method = request.method().toUpperCase();
-        if ("IN_KITCHEN".equals(order.get("status")) && order.get("payment") instanceof Map<?, ?> payment
-                && method.equals(payment.get("method")) && request.amount().setScale(2, RoundingMode.HALF_UP).compareTo(due) == 0) return;
-        if (!"CREATED".equals(order.get("status"))) throw conflict("ORDER_ALREADY_PAID", "This order is not waiting for payment.");
+        String priorPaymentMethod = jdbc.query("SELECT method FROM payment WHERE order_id = ?", rs -> rs.next() ? rs.getString(1) : null, orderId);
+        if ("IN_KITCHEN".equals(order.status()) && method.equals(priorPaymentMethod)
+                && request.amount().setScale(2, RoundingMode.HALF_UP).compareTo(due) == 0) return;
+        if (!"CREATED".equals(order.status())) throw conflict("ORDER_ALREADY_PAID", "This order is not waiting for payment.");
         if (request.amount().setScale(2, RoundingMode.HALF_UP).compareTo(due) != 0) {
             throw new ApiFailure(422, "AMOUNT_MISMATCH", "The recorded amount does not match the server-calculated order total.", Map.of("expectedAmount", due.toPlainString()));
         }
@@ -228,29 +229,30 @@ public class OrderService {
         }
         jdbc.update("INSERT INTO payment (order_id, method, amount, tendered, reference, paid_by) VALUES (?, ?, ?, ?, ?, ?)",
                 orderId, method, due, request.tendered(), request.reference(), actor.id());
-        jdbc.update("UPDATE order_header SET status = 'IN_KITCHEN', paid_at = now(), version = version + 1 WHERE id = ?", orderId);
+        updateOrder("UPDATE order_header SET status = 'IN_KITCHEN', paid_at = now(), version = version + 1 WHERE id = ? AND version = ?", orderId, order.version());
         audit(actor, "ORDER", orderId, "PAYMENT_RECORDED", method, correlationId);
     }
 
     @Transactional
     public void cancel(long orderId, CancelRequest request, ApiActor actor, String correlationId) {
-        Map<String, Object> current = order(orderId);
-        checkVersion(request.expectedVersion(), ((Number) current.get("version")).longValue());
-        if (List.of("CANCELLED", "COMPLETED").contains(current.get("status"))) throw conflict("ORDER_CLOSED", "This order is already closed.");
-        if (!actor.role().equals("MANAGER") && !actor.role().equals("ADMIN") && !"CREATED".equals(current.get("status"))) {
+        OrderLock current = lockOrder(orderId);
+        checkVersion(request.expectedVersion(), current.version());
+        if (List.of("CANCELLED", "COMPLETED").contains(current.status())) throw conflict("ORDER_CLOSED", "This order is already closed.");
+        if (!actor.role().equals("MANAGER") && !actor.role().equals("ADMIN") && !"CREATED".equals(current.status())) {
             throw new ApiFailure(403, "FORBIDDEN", "Only a manager can cancel a paid order.");
         }
         String reason = request.reasonCode() + (request.reasonText() == null || request.reasonText().isBlank() ? "" : ": " + request.reasonText().trim());
-        if ("CREATED".equals(current.get("status"))) restoreReservedStock(orderId);
+        jdbc.queryForList("SELECT id FROM kitchen_ticket WHERE order_id = ? ORDER BY id FOR UPDATE", Long.class, orderId);
+        if ("CREATED".equals(current.status())) restoreReservedStock(orderId);
         Integer paymentCount = jdbc.queryForObject("SELECT count(*) FROM payment WHERE order_id = ?", Integer.class, orderId);
         if (paymentCount != null && paymentCount > 0) {
             Long paymentId = jdbc.queryForObject("SELECT id FROM payment WHERE order_id = ?", Long.class, orderId);
             jdbc.update("INSERT INTO payment_refund (order_id, payment_id, amount, status, reason, initiated_by) VALUES (?, ?, ?, 'REFUND_PENDING', ?, ?)",
                     orderId, paymentId, orderTotal(orderId), reason, actor.id());
         }
-        jdbc.update("UPDATE order_header SET status = 'CANCELLED', cancelled_at = now(), cancelled_by = ?, cancellation_reason = ?, version = version + 1 WHERE id = ?",
-                actor.id(), reason, orderId);
-        jdbc.update("UPDATE kitchen_ticket SET status = 'CANCELLED', version = version + 1 WHERE order_id = ? AND status IN ('NEW', 'ACCEPTED', 'IN_PROGRESS')", orderId);
+        updateOrder("UPDATE order_header SET status = 'CANCELLED', cancelled_at = now(), cancelled_by = ?, cancellation_reason = ?, version = version + 1 WHERE id = ? AND version = ?",
+                actor.id(), reason, orderId, current.version());
+        jdbc.update("UPDATE kitchen_ticket SET status = 'CANCELLED', version = version + 1 WHERE order_id = ? AND status <> 'CANCELLED'", orderId);
         audit(actor, "ORDER", orderId, "ORDER_CANCELLED", reason, correlationId);
     }
 
@@ -295,40 +297,41 @@ public class OrderService {
 
     @Transactional
     public void complete(long orderId, ActionRequest request, ApiActor actor, String correlationId) {
-        Map<String, Object> current = order(orderId);
-        checkVersion(request.expectedVersion(), ((Number) current.get("version")).longValue());
-        if (!"READY".equals(current.get("status"))) throw conflict("ORDER_NOT_READY", "Only a ready order can be closed.");
+        OrderLock current = lockOrder(orderId);
+        checkVersion(request.expectedVersion(), current.version());
+        if (!"READY".equals(current.status())) throw conflict("ORDER_NOT_READY", "Only a ready order can be closed.");
         Integer outstanding = jdbc.queryForObject("SELECT count(*) FROM kitchen_ticket WHERE order_id = ? AND status NOT IN ('SERVED', 'CANCELLED')", Integer.class, orderId);
         if (outstanding != null && outstanding > 0) throw new ApiFailure(409, "INVALID_TRANSITION",
                 "Every active station ticket must be served before closing this order.",
-                Map.of("currentStatus", current.get("status"), "requestedOperation", "COMPLETE", "reason", "TICKETS_NOT_SERVED"));
-        jdbc.update("UPDATE order_header SET status = 'COMPLETED', completed_at = now(), version = version + 1 WHERE id = ?", orderId);
+                Map.of("currentStatus", current.status(), "requestedOperation", "COMPLETE", "reason", "TICKETS_NOT_SERVED"));
+        updateOrder("UPDATE order_header SET status = 'COMPLETED', completed_at = now(), version = version + 1 WHERE id = ? AND version = ?", orderId, current.version());
         audit(actor, "ORDER", orderId, "ORDER_COMPLETED", null, correlationId);
     }
 
     @Transactional
     public void setPriority(long orderId, boolean priority, String reason, Long expectedVersion, ApiActor actor, String correlationId) {
-        Map<String, Object> current = order(orderId);
-        checkVersion(expectedVersion, ((Number) current.get("version")).longValue());
-        if (List.of("CANCELLED", "COMPLETED").contains(current.get("status"))) throw conflict("ORDER_CLOSED", "Closed orders cannot be reprioritized.");
+        OrderLock current = lockOrder(orderId);
+        checkVersion(expectedVersion, current.version());
+        if (List.of("CANCELLED", "COMPLETED").contains(current.status())) throw conflict("ORDER_CLOSED", "Closed orders cannot be reprioritized.");
         if (priority && (reason == null || reason.isBlank())) throw bad("REASON_REQUIRED", "Enter a reason for priority service.");
-        jdbc.update("UPDATE order_header SET priority = ?, priority_reason = ?, version = version + 1 WHERE id = ?",
-                priority, priority ? reason.trim() : null, orderId);
+        updateOrder("UPDATE order_header SET priority = ?, priority_reason = ?, version = version + 1 WHERE id = ? AND version = ?",
+                priority, priority ? reason.trim() : null, orderId, current.version());
         audit(actor, "ORDER", orderId, priority ? "PRIORITY_SET" : "PRIORITY_CLEARED", reason, correlationId);
     }
 
     @Transactional
     public void setRush(long orderId, boolean rush, Long expectedVersion, ApiActor actor, String correlationId) {
-        Map<String, Object> current = order(orderId);
-        checkVersion(expectedVersion, ((Number) current.get("version")).longValue());
-        if (List.of("CANCELLED", "COMPLETED").contains(current.get("status"))) throw conflict("ORDER_CLOSED", "Closed orders cannot be rushed.");
-        jdbc.update("UPDATE order_header SET rush = ?, version = version + 1 WHERE id = ?", rush, orderId);
+        OrderLock current = lockOrder(orderId);
+        checkVersion(expectedVersion, current.version());
+        if (List.of("CANCELLED", "COMPLETED").contains(current.status())) throw conflict("ORDER_CLOSED", "Closed orders cannot be rushed.");
+        updateOrder("UPDATE order_header SET rush = ?, version = version + 1 WHERE id = ? AND version = ?", rush, orderId, current.version());
         audit(actor, "ORDER", orderId, rush ? "RUSH_SET" : "RUSH_CLEARED", null, correlationId);
     }
 
     @Transactional
     public void managerTicketAction(long ticketId, String step, String reason, ActionRequest request, ApiActor actor, String correlationId) {
         if (!List.of("START", "DONE", "SERVED").contains(step) || reason == null || reason.isBlank()) throw bad("INVALID_OVERRIDE", "Choose a ticket step and enter a reason.");
+        lockOrder(ticketOrderId(ticketId));
         var records = jdbc.query("SELECT id, order_id, station_id, status, version FROM kitchen_ticket WHERE id = ? FOR UPDATE",
                 (rs, row) -> new TicketRow(rs.getLong("id"), rs.getLong("order_id"), rs.getLong("station_id"), rs.getString("status"), rs.getLong("version")), ticketId);
         if (records.isEmpty()) throw new ApiFailure(404, "NOT_FOUND", "Kitchen ticket not found.");
@@ -439,6 +442,7 @@ public class OrderService {
 
     @Transactional
     public void ticketAction(long ticketId, String action, ActionRequest request, ApiActor actor, String correlationId) {
+        OrderLock order = lockOrder(ticketOrderId(ticketId));
         var records = jdbc.query("SELECT id, order_id, station_id, status, version FROM kitchen_ticket WHERE id = ? FOR UPDATE",
                 (rs, row) -> new TicketRow(rs.getLong("id"), rs.getLong("order_id"), rs.getLong("station_id"), rs.getString("status"), rs.getLong("version")), ticketId);
         if (records.isEmpty()) throw new ApiFailure(404, "NOT_FOUND", "Kitchen ticket not found.");
@@ -474,7 +478,9 @@ public class OrderService {
                 if (!List.of("DONE", "SERVED").contains(ticket.status())) throw conflict("INVALID_TRANSITION", "Only a ready or served ticket can be recalled.");
                 next = "IN_PROGRESS";
                 jdbc.update("UPDATE kitchen_ticket SET status = ?, started_at = coalesce(started_at, now()), done_at = null, served_at = null, served_by = null, recall_count = recall_count + 1, version = version + 1 WHERE id = ?", next, ticketId);
-                jdbc.update("UPDATE order_header SET status = 'IN_KITCHEN', ready_at = null, version = version + 1 WHERE id = ? AND status = 'READY'", ticket.orderId());
+                if ("READY".equals(order.status())) {
+                    updateOrder("UPDATE order_header SET status = 'IN_KITCHEN', ready_at = null, version = version + 1 WHERE id = ? AND status = 'READY' AND version = ?", ticket.orderId(), order.version());
+                }
             }
             case "acknowledge-cancel" -> {
                 requireTicketStatus(ticket.status(), "CANCELLED"); next = ticket.status();
@@ -540,10 +546,29 @@ public class OrderService {
     }
 
     private void updateOrderReady(long orderId) {
+        OrderLock order = lockOrder(orderId);
         Integer open = jdbc.queryForObject("SELECT count(*) FROM kitchen_ticket WHERE order_id = ? AND status NOT IN ('DONE', 'SERVED', 'CANCELLED')", Integer.class, orderId);
-        if (open != null && open == 0) {
-            jdbc.update("UPDATE order_header SET status = 'READY', ready_at = coalesce(ready_at, now()), version = version + 1 WHERE id = ? AND status = 'IN_KITCHEN'", orderId);
+        if (open != null && open == 0 && "IN_KITCHEN".equals(order.status())) {
+            updateOrder("UPDATE order_header SET status = 'READY', ready_at = coalesce(ready_at, now()), version = version + 1 WHERE id = ? AND status = 'IN_KITCHEN' AND version = ?", orderId, order.version());
         }
+    }
+
+    private OrderLock lockOrder(long orderId) {
+        var rows = jdbc.query("SELECT id, status, version FROM order_header WHERE id = ? FOR UPDATE",
+                (rs, row) -> new OrderLock(rs.getLong("id"), rs.getString("status"), rs.getLong("version")), orderId);
+        if (rows.isEmpty()) throw new ApiFailure(404, "NOT_FOUND", "Order not found.");
+        return rows.getFirst();
+    }
+
+    private long ticketOrderId(long ticketId) {
+        var orderIds = jdbc.query("SELECT order_id FROM kitchen_ticket WHERE id = ?",
+                (rs, row) -> rs.getLong("order_id"), ticketId);
+        if (orderIds.isEmpty()) throw new ApiFailure(404, "NOT_FOUND", "Kitchen ticket not found.");
+        return orderIds.getFirst();
+    }
+
+    private void updateOrder(String sql, Object... args) {
+        if (jdbc.update(sql, args) == 0) throw conflict("STALE_VERSION", "This record changed on another device. Refresh and try again.");
     }
 
     private void requireTicketStatus(String current, String required) {
@@ -602,5 +627,6 @@ public class OrderService {
     private record OrderItem(long id, String name, BigDecimal price, boolean available, boolean trackStock,
             Integer stockQuantity, int targetSeconds, BigDecimal gstRate) {}
     private record TicketRow(long id, long orderId, long stationId, String status, long version) {}
+    private record OrderLock(long id, String status, long version) {}
     private record RefundRow(String status, long version) {}
 }
