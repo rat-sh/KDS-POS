@@ -556,8 +556,7 @@ public class OrderService {
 
     public Map<String, Object> publicBoard() {
         List<Integer> preparing = jdbc.queryForList("SELECT DISTINCT o.token FROM order_header o JOIN kitchen_ticket t ON t.order_id = o.id WHERE o.status = 'IN_KITCHEN' AND t.status IN ('ACCEPTED', 'IN_PROGRESS') ORDER BY o.token", Integer.class);
-        List<Map<String, Object>> ready = jdbc.query("SELECT DISTINCT o.token, o.order_number, greatest(0, floor(extract(epoch FROM (now() - coalesce(o.paid_at, o.created_at))))::bigint) AS age_seconds FROM order_header o JOIN kitchen_ticket t ON t.order_id = o.id WHERE o.status = 'READY' ORDER BY o.token",
-                (rs, row) -> map("token", rs.getInt("token"), "orderNumber", rs.getString("order_number"), "ageSeconds", rs.getLong("age_seconds")));
+        List<Integer> ready = jdbc.queryForList("SELECT DISTINCT o.token FROM order_header o JOIN kitchen_ticket t ON t.order_id = o.id WHERE o.status = 'READY' ORDER BY o.token", Integer.class);
         return map("preparing", preparing, "ready", ready);
     }
 

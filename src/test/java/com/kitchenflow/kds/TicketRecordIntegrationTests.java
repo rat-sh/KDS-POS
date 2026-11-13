@@ -388,6 +388,31 @@ class TicketRecordIntegrationTests {
         mockMvc.perform(get(uri).with(authentication(cashierAuth))).andExpect(status().isForbidden());
     }
 
+    @Test
+    @Transactional
+    void publicBoardContainsOnlyTokenNumbers() throws Exception {
+        TestReferences references = insertTestStationAndCategory();
+        Long actorId = jdbc.queryForObject("SELECT id FROM app_user WHERE username = 'test-admin'", Long.class);
+        int token = 90000 + Math.floorMod(UUID.randomUUID().hashCode(), 9999);
+        jdbc.update("""
+                INSERT INTO order_header (order_number, business_date, token, order_type, status, created_by, paid_at)
+                VALUES (?, ?, ?, 'TAKEAWAY', 'READY', ?, now())
+                """, "KF-BOARD-" + UUID.randomUUID().toString().replace("-", "").substring(0, 12),
+                businessDays.currentBusinessDay(), token, actorId);
+        jdbc.update("""
+                INSERT INTO kitchen_ticket (order_id, station_id, status, target_seconds)
+                SELECT id, ?, 'DONE', 120 FROM order_header WHERE token = ? AND business_date = ?
+                """, references.stationId(), token, businessDays.currentBusinessDay());
+
+        String body = mockMvc.perform(get("/api/v1/board"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        Map<String, Object> board = objectMapper.readValue(body, new TypeReference<>() {});
+        List<?> readyTokens = (List<?>) board.get("ready");
+        assertThat(readyTokens).allMatch(Number.class::isInstance);
+        assertThat(readyTokens).anySatisfy(value -> assertThat(((Number) value).intValue()).isEqualTo(token));
+        assertThat(board.get("preparing")).isInstanceOf(List.class);
+    }
+
     @SuppressWarnings("unchecked")
     private Map<String, Object> fetchListedOrder(long orderId, long actorId, String role) throws Exception {
         ApiActor actor = new ApiActor(actorId, "test-admin", role, 0);
