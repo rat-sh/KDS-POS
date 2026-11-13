@@ -16,6 +16,7 @@ import com.kitchenflow.kds.order.api.OrderRequests.PaymentRequest;
 import com.kitchenflow.kds.order.api.OrderRequests.PriorityRequest;
 import com.kitchenflow.kds.order.api.OrderRequests.RushRequest;
 import com.kitchenflow.kds.order.api.OrderRequests.TicketRecord;
+import com.kitchenflow.kds.order.api.OrderViews;
 import com.kitchenflow.kds.config.api.ConfigRequests.SettingsRequest;
 import com.kitchenflow.kds.config.api.ConfigRequests.StationPatch;
 import com.kitchenflow.kds.config.api.ConfigRequests.StationCreateRequest;
@@ -26,7 +27,10 @@ import com.kitchenflow.kds.board.BoardStream;
 import com.kitchenflow.kds.common.config.KitchenFlowProperties;
 import com.kitchenflow.kds.common.security.ApiActor;
 import com.kitchenflow.kds.menu.service.CatalogService;
-import com.kitchenflow.kds.order.service.OrderService;
+import com.kitchenflow.kds.order.service.OrderQueryService;
+import com.kitchenflow.kds.order.service.OrderCommandService;
+import com.kitchenflow.kds.order.service.TicketService;
+import com.kitchenflow.kds.order.service.PaymentService;
 import com.kitchenflow.kds.auth.service.AuthService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
@@ -59,16 +63,23 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 public class KitchenFlowController {
     private final AuthService auth;
     private final CatalogService catalog;
-    private final OrderService orders;
+    private final OrderQueryService orderQueries;
+    private final OrderCommandService orderCommands;
+    private final TicketService tickets;
+    private final PaymentService payments;
     private final BoardStream boardStream;
     private final KitchenFlowProperties properties;
     private final ReportService reports;
 
-    public KitchenFlowController(AuthService auth, CatalogService catalog, OrderService orders,
+    public KitchenFlowController(AuthService auth, CatalogService catalog, OrderQueryService orderQueries,
+            OrderCommandService orderCommands, TicketService tickets, PaymentService payments,
             BoardStream boardStream, KitchenFlowProperties properties, ReportService reports) {
         this.auth = auth;
         this.catalog = catalog;
-        this.orders = orders;
+        this.orderQueries = orderQueries;
+        this.orderCommands = orderCommands;
+        this.tickets = tickets;
+        this.payments = payments;
         this.boardStream = boardStream;
         this.properties = properties;
         this.reports = reports;
@@ -115,9 +126,9 @@ public class KitchenFlowController {
 
     @GetMapping("/orders")
     @PreAuthorize("hasAnyRole('CASHIER','KITCHEN','MANAGER','ADMIN')")
-    public Map<String, Object> orders(@RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "100") int size,
+    public OrderViews.OrderPage orders(@RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "100") int size,
             @AuthenticationPrincipal ApiActor actor) {
-        return orders.orders(page, size, actor.role());
+        return orderQueries.orders(page, size, actor.role());
     }
 
     @GetMapping("/reports/summary")
@@ -134,20 +145,20 @@ public class KitchenFlowController {
 
     @GetMapping("/orders/{id}")
     @PreAuthorize("hasAnyRole('CASHIER','MANAGER')")
-    public Map<String, Object> order(@PathVariable long id) { return orders.order(id); }
+    public OrderViews.OrderResponse order(@PathVariable long id) { return orderQueries.order(id); }
 
     @GetMapping("/orders/{id}/payment")
     @PreAuthorize("hasAnyRole('CASHIER','MANAGER')")
-    public Map<String, Object> paymentDetails(@PathVariable long id) { return orders.payment(id); }
+    public Map<String, Object> paymentDetails(@PathVariable long id) { return payments.payment(id); }
 
     @GetMapping("/orders/{id}/bill")
     @PreAuthorize("hasAnyRole('CASHIER','MANAGER')")
-    public Map<String, Object> bill(@PathVariable long id) { return orders.bill(id); }
+    public Map<String, Object> bill(@PathVariable long id) { return orderQueries.bill(id); }
 
     @GetMapping("/orders/{id}/tickets")
     @PreAuthorize("hasAnyRole('CASHIER','MANAGER')")
     public Map<String, Object> orderTickets(@PathVariable long id) {
-        return Map.of("content", orders.orderTickets(id));
+        return Map.of("content", orderQueries.orderTickets(id));
     }
 
     @PostMapping("/orders")
@@ -155,7 +166,7 @@ public class KitchenFlowController {
     public ResponseEntity<Map<String, Object>> createOrder(@Valid @RequestBody CreateOrderRequest request,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @AuthenticationPrincipal ApiActor actor, HttpServletRequest servletRequest) {
-        var created = orders.create(request, idempotencyKey, actor, correlation(servletRequest));
+        var created = orderCommands.create(request, idempotencyKey, actor, correlation(servletRequest));
         ResponseEntity.BodyBuilder response = ResponseEntity.created(URI.create("/api/v1/orders/" + created.order().get("id")));
         if (created.replayed()) response.header("Idempotency-Replayed", "true");
         return response.body(created.order());
@@ -165,7 +176,7 @@ public class KitchenFlowController {
     @PreAuthorize("hasAnyRole('CASHIER','MANAGER','ADMIN')")
     public ResponseEntity<Void> payment(@PathVariable long id, @Valid @RequestBody PaymentRequest request,
             @AuthenticationPrincipal ApiActor actor, HttpServletRequest servletRequest) {
-        orders.recordPayment(id, request, actor, correlation(servletRequest));
+        payments.recordPayment(id, request, actor, correlation(servletRequest));
         return ResponseEntity.noContent().build();
     }
 
@@ -173,7 +184,7 @@ public class KitchenFlowController {
     @PreAuthorize("hasAnyRole('CASHIER','MANAGER','ADMIN')")
     public ResponseEntity<Void> cancel(@PathVariable long id, @Valid @RequestBody CancelRequest request,
             @AuthenticationPrincipal ApiActor actor, HttpServletRequest servletRequest) {
-        orders.cancel(id, request, actor, correlation(servletRequest));
+        orderCommands.cancel(id, request, actor, correlation(servletRequest));
         return ResponseEntity.noContent().build();
     }
 
@@ -181,7 +192,7 @@ public class KitchenFlowController {
     @PreAuthorize("hasAnyRole('MANAGER','ADMIN')")
     public ResponseEntity<Void> priority(@PathVariable long id, @RequestBody PriorityRequest request,
             @AuthenticationPrincipal ApiActor actor, HttpServletRequest servletRequest) {
-        orders.setPriority(id, Boolean.TRUE.equals(request.priority()), request.reason(), request.expectedVersion(), actor, correlation(servletRequest));
+        orderCommands.setPriority(id, request, actor, correlation(servletRequest));
         return ResponseEntity.noContent().build();
     }
 
@@ -189,7 +200,7 @@ public class KitchenFlowController {
     @PreAuthorize("hasAnyRole('MANAGER','ADMIN')")
     public ResponseEntity<Void> rush(@PathVariable long id, @RequestBody RushRequest request,
             @AuthenticationPrincipal ApiActor actor, HttpServletRequest servletRequest) {
-        orders.setRush(id, Boolean.TRUE.equals(request.rush()), request.expectedVersion(), actor, correlation(servletRequest));
+        orderCommands.setRush(id, request, actor, correlation(servletRequest));
         return ResponseEntity.noContent().build();
     }
 
@@ -197,7 +208,7 @@ public class KitchenFlowController {
     @PreAuthorize("hasAnyRole('MANAGER','ADMIN')")
     public ResponseEntity<Void> complete(@PathVariable long id, @RequestBody ActionRequest request,
             @AuthenticationPrincipal ApiActor actor, HttpServletRequest servletRequest) {
-        orders.complete(id, request, actor, correlation(servletRequest));
+        orderCommands.complete(id, request, actor, correlation(servletRequest));
         return ResponseEntity.noContent().build();
     }
 
@@ -205,27 +216,27 @@ public class KitchenFlowController {
     @PreAuthorize("hasRole('MANAGER')")
     public Map<String, Object> refunds(@RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size) {
-        return Map.of("content", orders.refunds(page, size));
+        return orderQueries.refunds(page, size);
     }
 
     @PostMapping("/refunds/{id}/complete")
     @PreAuthorize("hasRole('MANAGER')")
     public ResponseEntity<Void> completeRefund(@PathVariable long id, @RequestBody ActionRequest request,
             @AuthenticationPrincipal ApiActor actor, HttpServletRequest servletRequest) {
-        orders.completeRefund(id, request.expectedVersion(), actor, correlation(servletRequest));
+        payments.completeRefund(id, request, actor, correlation(servletRequest));
         return ResponseEntity.noContent().build();
     }
 
     @GetMapping("/stations/{stationId}/tickets")
     @PreAuthorize("hasAnyRole('KITCHEN','MANAGER','ADMIN')")
-    public List<Map<String, Object>> tickets(@PathVariable long stationId, @AuthenticationPrincipal ApiActor actor) {
-        return orders.stationTickets(stationId, actor);
+    public List<OrderViews.TicketResponse> tickets(@PathVariable long stationId, @AuthenticationPrincipal ApiActor actor) {
+        return tickets.stationTickets(stationId, actor);
     }
 
     @GetMapping("/tickets/{id}")
     @PreAuthorize("hasAnyRole('KITCHEN','MANAGER')")
-    public Map<String, Object> ticket(@PathVariable long id, @AuthenticationPrincipal ApiActor actor) {
-        return orders.ticketForActor(id, actor);
+    public OrderViews.TicketResponse ticket(@PathVariable long id, @AuthenticationPrincipal ApiActor actor) {
+        return tickets.ticket(id, actor);
     }
 
     @GetMapping("/stations/{stationId}/records")
@@ -233,7 +244,7 @@ public class KitchenFlowController {
     public ResponseEntity<?> ticketRecords(@PathVariable long stationId,
             @RequestParam(defaultValue = "ALL") String state, @RequestParam(required = false) String token,
             @RequestParam(defaultValue = "json") String format, @AuthenticationPrincipal ApiActor actor) {
-        List<TicketRecord> records = orders.stationTicketRecords(stationId, state, token, actor);
+        List<TicketRecord> records = tickets.records(stationId, state, token, actor);
         if (format.equalsIgnoreCase("csv")) {
             String csv = "ticketId,orderId,orderNumber,token,stationId,state,acceptedAt,acceptedBy,startedAt,doneAt,servedAt,servedBy,acceptToStartSeconds,cookSeconds,pickupSeconds,recallCount\n"
                     + records.stream().map(KitchenFlowController::csvRecord).collect(java.util.stream.Collectors.joining("\n"));
@@ -264,7 +275,7 @@ public class KitchenFlowController {
     @PreAuthorize("hasAnyRole('KITCHEN','MANAGER','ADMIN')")
     public ResponseEntity<Void> accept(@PathVariable long id, @RequestBody ActionRequest request,
             @AuthenticationPrincipal ApiActor actor, HttpServletRequest servletRequest) {
-        orders.ticketAction(id, "accept", request, actor, correlation(servletRequest));
+        tickets.action(id, "accept", request, actor, correlation(servletRequest));
         return ResponseEntity.noContent().build();
     }
 
@@ -272,7 +283,7 @@ public class KitchenFlowController {
     @PreAuthorize("hasAnyRole('KITCHEN','MANAGER','ADMIN')")
     public ResponseEntity<Void> start(@PathVariable long id, @RequestBody ActionRequest request,
             @AuthenticationPrincipal ApiActor actor, HttpServletRequest servletRequest) {
-        orders.ticketAction(id, "start", request, actor, correlation(servletRequest));
+        tickets.action(id, "start", request, actor, correlation(servletRequest));
         return ResponseEntity.noContent().build();
     }
 
@@ -280,7 +291,7 @@ public class KitchenFlowController {
     @PreAuthorize("hasAnyRole('KITCHEN','MANAGER','ADMIN')")
     public ResponseEntity<Void> bump(@PathVariable long id, @RequestBody ActionRequest request,
             @AuthenticationPrincipal ApiActor actor, HttpServletRequest servletRequest) {
-        orders.ticketAction(id, "bump", request, actor, correlation(servletRequest));
+        tickets.action(id, "bump", request, actor, correlation(servletRequest));
         return ResponseEntity.noContent().build();
     }
 
@@ -288,7 +299,7 @@ public class KitchenFlowController {
     @PreAuthorize("hasAnyRole('KITCHEN','MANAGER','ADMIN')")
     public ResponseEntity<Void> serve(@PathVariable long id, @RequestBody ActionRequest request,
             @AuthenticationPrincipal ApiActor actor, HttpServletRequest servletRequest) {
-        orders.ticketAction(id, "serve", request, actor, correlation(servletRequest));
+        tickets.action(id, "serve", request, actor, correlation(servletRequest));
         return ResponseEntity.noContent().build();
     }
 
@@ -296,7 +307,7 @@ public class KitchenFlowController {
     @PreAuthorize("hasAnyRole('KITCHEN','MANAGER','ADMIN')")
     public ResponseEntity<Void> recall(@PathVariable long id, @RequestBody ActionRequest request,
             @AuthenticationPrincipal ApiActor actor, HttpServletRequest servletRequest) {
-        orders.ticketAction(id, "recall", request, actor, correlation(servletRequest));
+        tickets.action(id, "recall", request, actor, correlation(servletRequest));
         return ResponseEntity.noContent().build();
     }
 
@@ -304,8 +315,7 @@ public class KitchenFlowController {
     @PreAuthorize("hasAnyRole('MANAGER','ADMIN')")
     public ResponseEntity<Void> managerAction(@PathVariable long id, @Valid @RequestBody ManagerTicketActionRequest request,
             @AuthenticationPrincipal ApiActor actor, HttpServletRequest servletRequest) {
-        orders.managerTicketAction(id, request.step().toUpperCase(), request.reason(),
-                new ActionRequest(request.expectedVersion()), actor, correlation(servletRequest));
+        tickets.managerAction(id, request, new ActionRequest(request.expectedVersion()), actor, correlation(servletRequest));
         return ResponseEntity.noContent().build();
     }
 
@@ -313,7 +323,7 @@ public class KitchenFlowController {
     @PreAuthorize("hasAnyRole('KITCHEN','MANAGER','ADMIN')")
     public ResponseEntity<Void> acknowledgeCancel(@PathVariable long id, @RequestBody ActionRequest request,
             @AuthenticationPrincipal ApiActor actor, HttpServletRequest servletRequest) {
-        orders.ticketAction(id, "acknowledge-cancel", request, actor, correlation(servletRequest));
+        tickets.action(id, "acknowledge-cancel", request, actor, correlation(servletRequest));
         return ResponseEntity.noContent().build();
     }
 
@@ -517,7 +527,7 @@ public class KitchenFlowController {
     }
 
     @GetMapping("/board")
-    public Map<String, Object> board() { return orders.publicBoard(); }
+    public Map<String, Object> board() { return orderQueries.publicBoard(); }
 
     @GetMapping("/stream/board")
     public SseEmitter boardStream() { return boardStream.subscribe(); }

@@ -32,11 +32,13 @@ public class OrderService {
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
     private final BusinessDayService businessDays;
+    private final PaymentService paymentService;
 
-    public OrderService(JdbcTemplate jdbc, ObjectMapper mapper, BusinessDayService businessDays) {
+    public OrderService(JdbcTemplate jdbc, ObjectMapper mapper, BusinessDayService businessDays, PaymentService paymentService) {
         this.jdbc = jdbc;
         this.mapper = mapper;
         this.businessDays = businessDays;
+        this.paymentService = paymentService;
     }
 
     @Transactional
@@ -258,15 +260,7 @@ public class OrderService {
 
     @Transactional(readOnly = true)
     public Map<String, Object> payment(long orderId) {
-        order(orderId);
-        var rows = jdbc.query("SELECT id, method, amount, tendered, reference, paid_at, paid_by FROM payment WHERE order_id = ?",
-                (rs, row) -> map("id", rs.getLong("id"), "method", rs.getString("method"),
-                        "amount", rs.getBigDecimal("amount").toPlainString(),
-                        "tendered", rs.getBigDecimal("tendered") == null ? null : rs.getBigDecimal("tendered").toPlainString(),
-                        "reference", rs.getString("reference"), "paidAt", rs.getObject("paid_at"),
-                        "paidBy", rs.getLong("paid_by")), orderId);
-        if (rows.isEmpty()) throw new ApiFailure(404, "NOT_FOUND", "No payment is recorded for this order.");
-        return rows.getFirst();
+        return paymentService.payment(orderId);
     }
 
     @Transactional(readOnly = true)
@@ -307,24 +301,7 @@ public class OrderService {
 
     @Transactional
     public void recordPayment(long orderId, PaymentRequest request, ApiActor actor, String correlationId) {
-        OrderLock order = lockOrder(orderId);
-        BigDecimal due = orderTotal(orderId);
-        String method = request.method().toUpperCase();
-        String priorPaymentMethod = jdbc.query("SELECT method FROM payment WHERE order_id = ?", rs -> rs.next() ? rs.getString(1) : null, orderId);
-        if ("IN_KITCHEN".equals(order.status()) && method.equals(priorPaymentMethod)
-                && request.amount().setScale(2, RoundingMode.HALF_UP).compareTo(due) == 0) return;
-        if (!"CREATED".equals(order.status())) throw conflict("ORDER_ALREADY_PAID", "This order is not waiting for payment.");
-        if (request.amount().setScale(2, RoundingMode.HALF_UP).compareTo(due) != 0) {
-            throw new ApiFailure(422, "AMOUNT_MISMATCH", "The recorded amount does not match the server-calculated order total.", Map.of("expectedAmount", due.toPlainString()));
-        }
-        if (!List.of("CASH", "UPI", "CARD").contains(method)) throw bad("INVALID_PAYMENT_METHOD", "Choose cash, UPI, or card.");
-        if (method.equals("CASH") && request.tendered() != null && request.tendered().compareTo(due) < 0) {
-            throw new ApiFailure(422, "VALIDATION_FAILED", "Cash tendered must cover the amount due.", Map.of("field", "tendered", "reason", "CASH_TENDERED_TOO_LOW"));
-        }
-        jdbc.update("INSERT INTO payment (order_id, method, amount, tendered, reference, paid_by) VALUES (?, ?, ?, ?, ?, ?)",
-                orderId, method, due, request.tendered(), request.reference(), actor.id());
-        updateOrder("UPDATE order_header SET status = 'IN_KITCHEN', paid_at = now(), version = version + 1 WHERE id = ? AND version = ?", orderId, order.version());
-        audit(actor, "ORDER", orderId, "PAYMENT_RECORDED", method, correlationId);
+        paymentService.recordPayment(orderId, request, actor, correlationId);
     }
 
     @Transactional
@@ -378,15 +355,7 @@ public class OrderService {
 
     @Transactional
     public void completeRefund(long refundId, Long expectedVersion, ApiActor actor, String correlationId) {
-        var rows = jdbc.query("SELECT status, version FROM payment_refund WHERE id = ? FOR UPDATE",
-                (rs, row) -> new RefundRow(rs.getString("status"), rs.getLong("version")), refundId);
-        if (rows.isEmpty()) throw new ApiFailure(404, "NOT_FOUND", "Refund not found.");
-        RefundRow refund = rows.getFirst();
-        checkVersion(expectedVersion, refund.version());
-        if (!refund.status().equals("REFUND_PENDING")) throw conflict("INVALID_TRANSITION", "Only pending refunds can be completed.");
-        jdbc.update("UPDATE payment_refund SET status = 'COMPLETED', completed_by = ?, completed_at = now(), version = version + 1 WHERE id = ?",
-                actor.id(), refundId);
-        audit(actor, "REFUND", refundId, "REFUND_COMPLETED", null, correlationId);
+        paymentService.completeRefund(refundId, new ActionRequest(expectedVersion), actor, correlationId);
     }
 
     @Transactional
