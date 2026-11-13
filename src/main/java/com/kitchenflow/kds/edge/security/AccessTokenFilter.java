@@ -1,6 +1,7 @@
 package com.kitchenflow.kds.edge.security;
 
 import com.kitchenflow.kds.common.security.AccessTokenVerifier;
+import com.kitchenflow.kds.common.security.ActorDirectory;
 import com.kitchenflow.kds.common.security.ApiActor;
 
 import jakarta.servlet.FilterChain;
@@ -16,8 +17,10 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 public class AccessTokenFilter extends OncePerRequestFilter {
     private final AccessTokenVerifier tokens;
-    public AccessTokenFilter(AccessTokenVerifier tokens) {
+    private final ActorDirectory actors;
+    public AccessTokenFilter(AccessTokenVerifier tokens, ActorDirectory actors) {
         this.tokens = tokens;
+        this.actors = actors;
     }
 
     @Override
@@ -25,11 +28,14 @@ public class AccessTokenFilter extends OncePerRequestFilter {
             throws ServletException, IOException {
         String header = request.getHeader("Authorization");
         if (header != null && header.startsWith("Bearer ")) {
-            ApiActor actor = tokens.verify(header.substring(7));
-            if (actor != null) {
+            ApiActor tokenActor = tokens.verify(header.substring(7));
+            ApiActor actor = tokenActor == null ? null : actors.findActiveActor(tokenActor.id());
+            if (actor != null && actor.role().equals(tokenActor.role()) && actor.version() == tokenActor.version()) {
                 var authentication = new UsernamePasswordAuthenticationToken(
                         actor, null, List.of(new SimpleGrantedAuthority("ROLE_" + actor.role())));
                 SecurityContextHolder.getContext().setAuthentication(authentication);
+            } else {
+                SecurityContextHolder.clearContext();
             }
         }
         chain.doFilter(request, response);

@@ -2,6 +2,7 @@ package com.kitchenflow.kds.edge.security;
 
 import com.kitchenflow.kds.common.config.KitchenFlowProperties;
 import com.kitchenflow.kds.common.security.AccessTokenVerifier;
+import com.kitchenflow.kds.common.security.ActorDirectory;
 
 import java.util.Arrays;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -32,7 +33,7 @@ public class SecurityConfiguration {
     }
 
     @Bean
-    SecurityFilterChain securityFilterChain(HttpSecurity http, AccessTokenVerifier tokens,
+    SecurityFilterChain securityFilterChain(HttpSecurity http, AccessTokenVerifier tokens, ActorDirectory actors,
             ApiSecurityErrorHandler apiErrors, ApplicationRateLimitFilter rateLimits)
             throws Exception {
         return http
@@ -46,7 +47,7 @@ public class SecurityConfiguration {
                         .requestMatchers("/actuator/health", "/api/v1/auth/login", "/api/v1/auth/refresh", "/api/v1/auth/logout", "/api/v1/board", "/api/v1/stream/board", "/api/v1/config/public").permitAll()
                         .requestMatchers("/actuator/**").hasRole("ADMIN")
                         .anyRequest().authenticated())
-                .addFilterBefore(new AccessTokenFilter(tokens), UsernamePasswordAuthenticationFilter.class)
+                .addFilterBefore(new AccessTokenFilter(tokens, actors), UsernamePasswordAuthenticationFilter.class)
                 .addFilterAfter(rateLimits, AccessTokenFilter.class)
                 .build();
     }
