@@ -45,15 +45,15 @@ Status values are Implemented, Partial, or Not done. Implemented requires both t
 | I-01 | See KF-API-001 endpoint index; revision 0.2 adds lifecycle/record endpoints | Not done | TBD | TBD |
 | I-02 | See KF-API-001 endpoint index; revision 0.2 adds lifecycle/record endpoints | Not done | TBD | TBD |
 | I-03 | See KF-API-001 endpoint index; revision 0.2 adds lifecycle/record endpoints | Not done | TBD | TBD |
-| O-01 | `POST /api/v1/orders` with user-scoped idempotency and token allocation | Partial | KitchenFlowController.createOrder / OrderService.create | TicketRecordIntegrationTests.createsIdempotentOrderAndCompletesPaidKitchenLifecycle |
-| O-02 | `GET /api/v1/orders` | Partial | KitchenFlowController.orders / OrderService.orders | No endpoint test; filters/cursor incomplete |
+| O-01 | `POST /api/v1/orders` with user-scoped idempotency and token allocation | Partial | KitchenFlowController.createOrder / OrderService.create | TicketRecordIntegrationTests.createsIdempotentOrderAndCompletesPaidKitchenLifecycle; invalidPaymentRollsBackOrderAndReservedStock |
+| O-02 | `GET /api/v1/orders` | Partial | KitchenFlowController.orders / OrderService.orders | TicketRecordIntegrationTests.ordersProjectionHidesPaymentOnlyForKitchenRole; filters/cursor incomplete |
 | O-03 | See KF-API-001 endpoint index; revision 0.2 adds lifecycle/record endpoints | Not done | TBD | TBD |
 | O-04 | See KF-API-001 endpoint index; revision 0.2 adds lifecycle/record endpoints | Not done | TBD | TBD |
-| O-05 | `POST /api/v1/orders/{id}/cancel` | Partial | KitchenFlowController.cancel / OrderService.cancel | No endpoint test |
+| O-05 | `POST /api/v1/orders/{id}/cancel` | Partial | KitchenFlowController.cancel / OrderService.cancel | TicketRecordIntegrationTests.concurrentCancelAndServeLeaveOrderAndTicketConsistent |
 | O-06 | `POST /api/v1/orders/{id}/complete` | Partial | KitchenFlowController.complete / OrderService.complete | TicketRecordIntegrationTests.createsIdempotentOrderAndCompletesPaidKitchenLifecycle |
 | O-07 | `PATCH /api/v1/orders/{id}/rush` (current path is available) | Partial | KitchenFlowController.rush / OrderService.setRush | No endpoint test |
 | O-08 | See KF-API-001 endpoint index; revision 0.2 adds lifecycle/record endpoints | Not done | TBD | TBD |
-| P-01 | `POST /api/v1/orders/{id}/payments` (simulated records only) | Partial | KitchenFlowController.payment / OrderService.recordPayment | No endpoint test |
+| P-01 | `POST /api/v1/orders/{id}/payments` (simulated records only) | Partial | KitchenFlowController.payment / OrderService.recordPayment | TicketRecordIntegrationTests.createsIdempotentOrderAndCompletesPaidKitchenLifecycle; invalidPaymentRollsBackOrderAndReservedStock exercises atomic POST /orders payment |
 | P-02 | See KF-API-001 endpoint index; revision 0.2 adds lifecycle/record endpoints | Not done | TBD | TBD |
 | P-03 | See KF-API-001 endpoint index; revision 0.2 adds lifecycle/record endpoints | Not done | TBD | TBD |
 | P-04 | See KF-API-001 endpoint index; revision 0.2 adds lifecycle/record endpoints | Not done | TBD | TBD |
@@ -73,7 +73,7 @@ Status values are Implemented, Partial, or Not done. Implemented requires both t
 | X-01 | See KF-API-001 endpoint index; revision 0.2 adds lifecycle/record endpoints | Not done | TBD | TBD |
 | X-02 | See KF-API-001 endpoint index; revision 0.2 adds lifecycle/record endpoints | Not done | TBD | TBD |
 | X-03 | `GET /api/v1/stream/board` | Partial | KitchenFlowController.boardStream / BoardStream | No stream test; other stream endpoints absent |
-| R-01 | See KF-API-001 endpoint index; revision 0.2 adds lifecycle/record endpoints | Not done | TBD | TBD |
+| R-01 | `GET /api/v1/reports/summary?from&to` aggregates sales, GST, top items, and prep time | Implemented | KitchenFlowController.reportSummary / ReportService.summary | TicketRecordIntegrationTests.reportSummaryAggregatesSalesGstTopItemsAndPrepTimeForManagerAndAdmin |
 | R-02 | See KF-API-001 endpoint index; revision 0.2 adds lifecycle/record endpoints | Not done | TBD | TBD |
 | R-03 | See KF-API-001 endpoint index; revision 0.2 adds lifecycle/record endpoints | Not done | TBD | TBD |
 | R-04 | See KF-API-001 endpoint index; revision 0.2 adds lifecycle/record endpoints | Not done | TBD | TBD |
@@ -103,7 +103,7 @@ Status values are Implemented, Partial, or Not done. Implemented requires both t
 | BR-14 | An order can be edited only while CREATED. | Partial | OrderService (edit not fully implemented) | No test |
 | BR-15 | A repeated Idempotency-Key within 24 hours with the same payload returns the original response; a different payload returns 422 IDEMPOTENCY_KEY_REUSED. | Partial | OrderService.create (idempotency check + advisory lock) | TicketRecordIntegrationTests.createsIdempotentOrderAndCompletesPaidKitchenLifecycle |
 | BR-16 | The business day runs from the configured cutoff (default 04:00 Asia/Kolkata) to the next cutoff; tokens and reports use the business day. | Partial | BusinessDayService / KitchenFlowProperties | No test |
-| BR-17 | A DONE ticket can be recalled only within the configured recall window (default 10 min) and only while its order is not COMPLETED. | Not done | OrderService.ticketAction recall (no window check implemented) | TBD |
+| BR-17 | A DONE ticket can be recalled only within the configured recall window (default 10 min) and only while its order is not COMPLETED. | Not done | OrderService.ticketAction recall (no window check implemented) | TicketRecordIntegrationTests.recallingReadyTicketIncrementsRecallCountAndReopensOrder covers recall behavior, not time-window enforcement |
 | BR-18 | Timestamps are stored in UTC and displayed in Asia/Kolkata. | Partial | ClockConfiguration / DB session UTC | No explicit test |
 | FR-AUD-01 | Record actor, role, time, entity, action, prev/new state, and reason for every state change, payment, price/availability/stock/user change. | Partial | CatalogService.audit / OrderService.audit (called in all mutations) | TicketRecordIntegrationTests (audit assertions) |
 | FR-AUD-02 | Audit records are append-only; the API offers no update or delete; the app DB user has no UPDATE/DELETE on the audit table. | Partial | DB migration (append-only trigger expected); SecurityConfiguration (no audit write endpoint) | No explicit test |
@@ -111,7 +111,7 @@ Status values are Implemented, Partial, or Not done. Implemented requires both t
 | FR-AUD-04 | The audit record must be written in the same transaction as the change it describes; a forced audit failure rolls back the business change. | Partial | CatalogService.audit / OrderService.audit (same @Transactional) | No explicit rollback test |
 | FR-AUTH-01 | Authenticate users by username + password; issue a signed access token valid for 15 minutes; wrong credentials return 401 with the same message. | Partial | AuthService.login / AccessTokenService.issue | No endpoint test |
 | FR-AUTH-02 | Store passwords only as BCrypt hashes; never log or return them. | Partial | SecurityConfiguration (BCryptPasswordEncoder cost 12) / CatalogService.saveUser | No test verifying log/response absence |
-| FR-AUTH-03 | Enforce role-based authorization on every endpoint except login, health, and the public board; unauthenticated → 401, unauthorized → 403. | Partial | SecurityConfiguration / AccessTokenFilter / @PreAuthorize annotations | No role-matrix test |
+| FR-AUTH-03 | Enforce role-based authorization on every endpoint except login, health, and the public board; unauthenticated → 401, unauthorized → 403. | Partial | SecurityConfiguration / AccessTokenFilter / @PreAuthorize annotations | TicketRecordIntegrationTests.ordersProjectionHidesPaymentOnlyForKitchenRole; reportSummaryAggregatesSalesGstTopItemsAndPrepTimeForManagerAndAdmin; no full role matrix |
 | FR-AUTH-04 | Bind each Kitchen user to one or more stations; allow that user to view and act only on those stations' tickets. | Partial | OrderService.stationTickets / ticketAction (station binding check) | No explicit station-binding test |
 | FR-AUTH-05 | Admin shall create, deactivate, and reactivate users and assign one role per user; a deactivated user cannot log in. | Partial | CatalogService.saveUser / AuthService.login (active check) | No test |
 | FR-AUTH-06 | Lock an account for 15 minutes after 5 consecutive failed logins within 10 minutes; the sixth attempt returns 429 even with the correct password. | Not done | AuthService.login (no lockout logic found) | TBD |
@@ -134,7 +134,7 @@ Status values are Implemented, Partial, or Not done. Implemented requires both t
 | FR-KDS-04 | Kitchen user or Manager shall RECALL a DONE ticket within the recall window (BR-17); ticket returns to IN_PROGRESS. | Partial | OrderService.ticketAction recall (no window enforcement) | TicketRecordIntegrationTests.recallingReadyTicketIncrementsRecallCountAndReopensOrder |
 | FR-KDS-05 | Push ticket creation, change, and cancellation to subscribed station screens in real time via SSE; a reconnecting screen reloads full current state. | Partial | BoardStream (board only; no per-station SSE push on ticket change) | No stream test |
 | FR-KDS-06 | Set an order to READY exactly once, in the same transaction as the bump of its last open ticket (BR-06). | Partial | OrderService.updateOrderReady (atomic READY update with status = IN_KITCHEN guard) | TicketRecordIntegrationTests.createsIdempotentOrderAndCompletesPaidKitchenLifecycle |
-| FR-KDS-07 | Detect two users changing the same ticket concurrently; accept one, reject the other with 409 STALE_VERSION and current ticket state. | Partial | OrderService.ticketAction (checkVersion) | No concurrency test |
+| FR-KDS-07 | Detect two users changing the same ticket concurrently; accept one, reject the other with 409 STALE_VERSION and current ticket state. | Partial | OrderService.ticketAction (checkVersion) | TicketRecordIntegrationTests.concurrentCancelAndServeLeaveOrderAndTicketConsistent tests competing cancel/serve actions; no same-ticket stale-version assertion |
 | FR-KDS-08 | When an order is cancelled, remove open tickets from station queues and show a CANCELLED notice until acknowledged. | Partial | OrderService.cancel (cancels NEW/ACCEPTED/IN_PROGRESS tickets) / ticketAction acknowledge-cancel | No test |
 | FR-KDS-09 | The manager board shall show every open order with the status of each of its tickets and list tickets past their target time. | Not done | TBD | TBD |
 | FR-KDS-10 | Show a distinct rush marker on rush tickets; rush tickets sort first. | Not done | TBD | TBD |

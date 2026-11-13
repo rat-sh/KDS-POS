@@ -29,7 +29,7 @@ A QSR kitchen runs on speed and coordination. Every second between an order bein
 - Tickets auto-route to the correct station based on menu item assignments
 - Live **SLA traffic-light timer** turns amber at a configurable threshold, red at another — staff can see at a glance what's late before the customer knows
 - **Accept → Start → Mark Ready** workflow enforces discipline; timestamps every step
-- **Recall** brings a bumped ticket back within a window (accidental bump recovery)
+- **Recall** brings a bumped ticket back for accidental bump recovery. The intended recall window is 10 minutes; the backend does not enforce that window yet.
 - **Priority** and **Rush** orders float to the top of the queue automatically
 - VIP and cancelled tickets have distinct visual treatment
 - Station Inventory sidebar shows today's item throughput by station
@@ -72,7 +72,7 @@ A QSR kitchen runs on speed and coordination. Every second between an order bein
 ## Architecture
 
 ```
-Browser ──► Nginx Gateway (:8080) ──► Spring Boot API (:8081) ──► PostgreSQL (:5432)
+Browser ──► Nginx Gateway (host :8080) ──► Spring Boot API (container :8080) ──► PostgreSQL (:5432)
                 │                              │
          Rate limiting                   Flyway migrations
          SPA fallback                    HMAC-SHA256 JWT
@@ -109,7 +109,7 @@ cp .env.example .env
 docker compose up --build -d
 
 # 3. Open the app
-open http://localhost:8080
+open http://localhost:8080  # gateway published on the host; the API listens on :8080 inside Compose
 
 # 4. Sign in with the bootstrap admin credentials from your .env
 ```
@@ -137,7 +137,7 @@ docker compose up -d database
 cd KitchenFlow_Operations_Screens
 bun install
 bun run dev
-# → http://localhost:5173  (Vite proxies /api and /actuator to :8080)
+# → http://localhost:5173  (Vite proxies /api and /actuator to the local API at :8080 by default)
 ```
 
 ---
