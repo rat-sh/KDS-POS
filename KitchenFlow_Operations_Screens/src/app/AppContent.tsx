@@ -27,7 +27,7 @@ export function AppContent(props: Props) {
   if (page === "Users") return <UsersPage />
   if (page === "Stations") return <AdminStations />
   if (page === "Settings") return <SettingsPage />
-  if (page === "Reports") return <Reports orders={allOrders} />
+  if (page === "Reports") return <Reports />
   if (page === "Audit") return <Audit orders={allOrders} />
   return <SimplePage title={page} />
 }

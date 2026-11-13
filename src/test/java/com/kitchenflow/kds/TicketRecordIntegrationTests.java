@@ -40,6 +40,7 @@ import org.springframework.transaction.annotation.Transactional;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @Import(TestcontainersConfiguration.class)
@@ -341,6 +342,50 @@ class TicketRecordIntegrationTests {
 
         assertThat(jdbc.queryForObject("SELECT count(*) FROM order_header", Integer.class)).isEqualTo(initialOrders);
         assertThat(jdbc.queryForObject("SELECT stock_quantity FROM menu_item WHERE id = ?", Integer.class, itemId)).isEqualTo(initialStock);
+    }
+
+    @Test
+    void reportSummaryAggregatesSalesGstTopItemsAndPrepTimeForManagerAndAdmin() throws Exception {
+        TestReferences references = insertTestStationAndCategory();
+        Long managerId = jdbc.queryForObject("SELECT id FROM app_user WHERE username = 'test-admin'", Long.class);
+        ApiActor manager = new ApiActor(managerId, "test-admin", "MANAGER", 0);
+        long itemId = catalog.saveMenuItem(null, new MenuItemRequest("Report item " + UUID.randomUUID(), references.categoryName(),
+                new BigDecimal("100.00"), List.of(references.stationName()), 240, true, 0, false, List.of()), manager, "report-test");
+        int token = 80000 + Math.floorMod(UUID.randomUUID().hashCode(), 19999);
+        Long orderId = jdbc.queryForObject("""
+                INSERT INTO order_header (order_number, business_date, token, order_type, status, created_by, paid_at)
+                VALUES (?, ?, ?, 'TAKEAWAY', 'COMPLETED', ?, now()) RETURNING id
+                """, Long.class, "KF-TEST-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16),
+                businessDays.currentBusinessDay(), token, managerId);
+        jdbc.update("""
+                INSERT INTO order_line (order_id, item_id, item_name, quantity, unit_price, gst_rate, target_prep_seconds)
+                VALUES (?, ?, 'Report item', 2, 100.00, 5.00, 240)
+                """, orderId, itemId);
+        jdbc.update("""
+                INSERT INTO kitchen_ticket (order_id, station_id, status, target_seconds, started_at, done_at)
+                VALUES (?, ?, 'SERVED', 240, now() - interval '2 minutes', now())
+                """, orderId, references.stationId());
+        String date = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Kolkata")).toString();
+        String uri = "/api/v1/reports/summary?from=" + date + "&to=" + date + "&topSize=1";
+
+        var managerAuth = new UsernamePasswordAuthenticationToken(manager, null,
+                List.of(new SimpleGrantedAuthority("ROLE_MANAGER")));
+        mockMvc.perform(get(uri).with(authentication(managerAuth)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sales").value("210.00"))
+                .andExpect(jsonPath("$.gst").value("10.00"))
+                .andExpect(jsonPath("$.topItems.content[0].itemId").value(itemId))
+                .andExpect(jsonPath("$.topItems.content[0].quantity").value(2))
+                .andExpect(jsonPath("$.topItems.totalPages").value(1))
+                .andExpect(jsonPath("$.prepTimeByStation[0].averageSeconds").value(120))
+                .andExpect(jsonPath("$.ordersPerHour.length()").value(24));
+
+        var adminAuth = new UsernamePasswordAuthenticationToken(manager, null,
+                List.of(new SimpleGrantedAuthority("ROLE_ADMIN")));
+        mockMvc.perform(get(uri).with(authentication(adminAuth))).andExpect(status().isOk());
+        var cashierAuth = new UsernamePasswordAuthenticationToken(manager, null,
+                List.of(new SimpleGrantedAuthority("ROLE_CASHIER")));
+        mockMvc.perform(get(uri).with(authentication(cashierAuth))).andExpect(status().isForbidden());
     }
 
     @SuppressWarnings("unchecked")
