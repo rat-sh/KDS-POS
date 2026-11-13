@@ -1,6 +1,6 @@
 # KitchenFlow KDS
 
-**KitchenFlow** is a production-ready Kitchen Display System (KDS) for Quick Service Restaurants (QSRs) — built from scratch as a full-stack application that replaces paper dockets, verbal ticket handoffs, and passive display boards with a live, role-driven operations platform.
+**KitchenFlow** is a Kitchen Display System (KDS) for Quick Service Restaurants (QSRs) — built from scratch as a full-stack application that replaces paper dockets, verbal ticket handoffs, and passive display boards with a live, role-driven operations platform.
 
 ---
 
@@ -62,8 +62,9 @@ A QSR kitchen runs on speed and coordination. Every second between an order bein
 - **Audit Log** — every write operation is logged with actor, role, entity, and reason; append-only, cannot be tampered with
 
 ### For the Kitchen Screen (Public Board)
-- Unauthenticated SSE-driven board showing all active orders and their station statuses
-- Auto-reconnects on network drop
+- Public SSE stream contains token numbers only: preparing and ready tokens
+- The public board reconnects with backoff after stream errors; JSON polling continues every five seconds
+- Kitchen and cashier screens use five-second polling and do not receive the public SSE stream
 - Useful for a secondary display at the pass or expediter station
 
 ---
@@ -291,7 +292,8 @@ kds/
 | POST | `/api/v1/tickets/{id}/serve` | Kitchen | Mark served |
 | POST | `/api/v1/tickets/{id}/recall` | Kitchen | Recall bumped ticket |
 | GET | `/api/v1/stations/{id}/records` | Kitchen/Manager | Timing records (JSON or CSV) |
-| GET | `/api/v1/board` | Public (SSE) | Live order board stream |
+| GET | `/api/v1/board` | Public | Current preparing and ready tokens (JSON) |
+| GET | `/api/v1/stream/board` | Public (SSE) | Preparing and ready tokens (SSE stream) |
 | GET | `/api/v1/admin/categories` | Admin | List menu categories |
 | POST | `/api/v1/admin/categories` | Admin | Create category |
 | PATCH | `/api/v1/admin/categories/{id}` | Admin | Update name/GST/active |

@@ -23,18 +23,19 @@ public class BoardStream {
         emitter.onCompletion(() -> emitters.remove(emitter));
         emitter.onTimeout(() -> emitters.remove(emitter));
         emitter.onError(error -> emitters.remove(emitter));
-        send(emitter);
+        send(emitter, orders.publicBoard());
         return emitter;
     }
 
     @Scheduled(fixedDelay = 3000)
     public void publishBoardSnapshot() {
-        for (SseEmitter emitter : emitters) send(emitter);
+        var board = orders.publicBoard();
+        for (SseEmitter emitter : emitters) send(emitter, board);
     }
 
-    private void send(SseEmitter emitter) {
+    private void send(SseEmitter emitter, Object board) {
         try {
-            emitter.send(SseEmitter.event().name("board").data(orders.publicBoard()));
+            emitter.send(SseEmitter.event().name("board").data(board));
         } catch (IOException | IllegalStateException exception) {
             emitters.remove(emitter);
             emitter.completeWithError(exception);
