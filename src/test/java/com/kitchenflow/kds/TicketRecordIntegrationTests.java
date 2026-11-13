@@ -8,6 +8,8 @@ import com.kitchenflow.kds.common.error.ApiFailure;
 import com.kitchenflow.kds.order.api.OrderRequests.TicketRecord;
 import com.kitchenflow.kds.order.api.OrderRequests.ActionRequest;
 import com.kitchenflow.kds.order.api.OrderRequests.CancelRequest;
+import com.kitchenflow.kds.order.api.OrderRequests.CreateOrderRequest;
+import com.kitchenflow.kds.order.api.OrderRequests.OrderLineRequest;
 import com.kitchenflow.kds.order.service.OrderService;
 import com.kitchenflow.kds.menu.service.CatalogService;
 import com.kitchenflow.kds.menu.api.MenuItemRequest;
@@ -215,6 +217,39 @@ class TicketRecordIntegrationTests {
         } else {
             assertThat(orderStatus).isEqualTo("READY");
             assertThat(ticketStatus).isEqualTo("SERVED");
+        }
+    }
+
+    @Test
+    void concurrentCreatesLockSharedItemsInSortedOrder() throws Exception {
+        TestReferences references = insertTestStationAndCategory();
+        Long managerId = jdbc.queryForObject("SELECT id FROM app_user WHERE username = 'test-admin'", Long.class);
+        ApiActor manager = new ApiActor(managerId, "test-admin", "MANAGER", 0);
+        long firstItem = catalog.saveMenuItem(null, new MenuItemRequest("First " + UUID.randomUUID(), references.categoryName(),
+                new BigDecimal("10.00"), List.of(references.stationName()), 240, true, 0, false, List.of()), manager, "create-race");
+        long secondItem = catalog.saveMenuItem(null, new MenuItemRequest("Second " + UUID.randomUUID(), references.categoryName(),
+                new BigDecimal("12.00"), List.of(references.stationName()), 240, true, 0, false, List.of()), manager, "create-race");
+        CreateOrderRequest forward = new CreateOrderRequest("TAKEAWAY", null,
+                List.of(new OrderLineRequest(firstItem, 1, List.of()), new OrderLineRequest(secondItem, 1, List.of())), "create race", false, null);
+        CreateOrderRequest reverse = new CreateOrderRequest("TAKEAWAY", null,
+                List.of(new OrderLineRequest(secondItem, 1, List.of()), new OrderLineRequest(firstItem, 1, List.of())), "create race", false, null);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var first = executor.submit(() -> {
+                ready.countDown();
+                start.await();
+                return orders.create(forward, "create-forward-" + UUID.randomUUID(), manager, "create-race");
+            });
+            var second = executor.submit(() -> {
+                ready.countDown();
+                start.await();
+                return orders.create(reverse, "create-reverse-" + UUID.randomUUID(), manager, "create-race");
+            });
+            ready.await();
+            start.countDown();
+            assertThat(first.get().order()).containsKey("id");
+            assertThat(second.get().order()).containsKey("id");
         }
     }
 
