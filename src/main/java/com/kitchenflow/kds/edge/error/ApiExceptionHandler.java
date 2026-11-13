@@ -7,6 +7,7 @@ import java.util.Map;
 import java.util.List;
 import java.time.Clock;
 import java.time.Instant;
+import java.sql.SQLException;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
@@ -62,7 +63,18 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     ResponseEntity<?> unexpected(Exception failure, HttpServletRequest request) {
+        if (isRetryableDatabaseFailure(failure)) {
+            return response(409, "RETRYABLE", "The request conflicted with another database operation. Retry it.", request, Map.of(), List.of());
+        }
         return response(500, "INTERNAL_ERROR", "The request could not be completed.", request, Map.of(), List.of());
+    }
+
+    private boolean isRetryableDatabaseFailure(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof SQLException sqlException
+                    && ("40P01".equals(sqlException.getSQLState()) || "40001".equals(sqlException.getSQLState()))) return true;
+        }
+        return false;
     }
 
     private ResponseEntity<ErrorBody> response(int status, String code, String message, HttpServletRequest request,

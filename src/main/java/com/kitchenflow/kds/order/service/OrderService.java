@@ -14,6 +14,7 @@ import com.kitchenflow.kds.order.api.OrderRequests.TicketRecord;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.security.MessageDigest;
+import java.sql.PreparedStatement;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HexFormat;
@@ -57,13 +58,28 @@ public class OrderService {
                 catch (Exception exception) { throw new IllegalStateException("Stored order response could not be read.", exception); }
             }
         }
+        String orderType = request.orderType().toUpperCase();
+        if (!List.of("DINE_IN", "TAKEAWAY", "DELIVERY").contains(orderType)) throw bad("INVALID_ORDER_TYPE", "Choose a valid order type.");
+        if (orderType.equals("DINE_IN") && (request.table() == null || request.table().isBlank())) throw bad("TABLE_REQUIRED", "Enter a table for dine-in orders.");
+
+        List<Long> itemIds = request.items().stream().map(OrderLineRequest::itemId).distinct().sorted().toList();
+        List<OrderItem> lockedItems = lockMenuItems(itemIds);
+        Map<Long, OrderItem> itemsById = new LinkedHashMap<>();
+        lockedItems.forEach(item -> itemsById.put(item.id(), item));
+        if (itemsById.size() != itemIds.size()) throw new ApiFailure(404, "NOT_FOUND", "An order item no longer exists.");
+        Map<Long, Integer> quantitiesByItem = new LinkedHashMap<>();
+        request.items().forEach(line -> quantitiesByItem.merge(line.itemId(), line.quantity(), Math::addExact));
+        for (var entry : quantitiesByItem.entrySet()) {
+            OrderItem item = itemsById.get(entry.getKey());
+            if (!item.available() || (item.trackStock() && item.stockQuantity() != null && item.stockQuantity() < entry.getValue())) {
+                throw conflict("ITEM_UNAVAILABLE", item.name() + " is not available in the requested quantity.");
+            }
+        }
+
         LocalDate businessDate = businessDays.currentBusinessDay();
         Integer tokenValue = jdbc.queryForObject("INSERT INTO token_counter (business_day, next_token) VALUES (?, 2) ON CONFLICT (business_day) DO UPDATE SET next_token = token_counter.next_token + 1 RETURNING next_token - 1", Integer.class, businessDate);
         int token = tokenValue == null ? 1 : tokenValue;
         String orderNumber = "KF-" + businessDate.toString().replace("-", "") + "-" + String.format("%04d", token);
-        String orderType = request.orderType().toUpperCase();
-        if (!List.of("DINE_IN", "TAKEAWAY", "DELIVERY").contains(orderType)) throw bad("INVALID_ORDER_TYPE", "Choose a valid order type.");
-        if (orderType.equals("DINE_IN") && (request.table() == null || request.table().isBlank())) throw bad("TABLE_REQUIRED", "Enter a table for dine-in orders.");
 
         Long orderId = jdbc.queryForObject("""
                 INSERT INTO order_header (order_number, business_date, token, order_type, table_name, status, rush, priority, priority_reason, note, created_by)
@@ -75,19 +91,7 @@ public class OrderService {
         Map<Long, List<Long>> linesByStation = new LinkedHashMap<>();
         Map<Long, Integer> targetByStation = new LinkedHashMap<>();
         for (OrderLineRequest line : request.items()) {
-            var itemRows = jdbc.query("""
-                    SELECT i.id, i.name, i.price, i.available, i.track_stock, i.stock_quantity, i.target_prep_seconds,
-                           c.gst_rate, c.id AS category_id
-                    FROM menu_item i JOIN menu_category c ON c.id = i.category_id
-                    WHERE i.id = ? AND i.archived = false FOR UPDATE OF i
-                    """, (rs, row) -> new OrderItem(rs.getLong("id"), rs.getString("name"), rs.getBigDecimal("price"),
-                    rs.getBoolean("available"), rs.getBoolean("track_stock"), rs.getObject("stock_quantity", Integer.class),
-                    rs.getInt("target_prep_seconds"), rs.getBigDecimal("gst_rate")), line.itemId());
-            if (itemRows.isEmpty()) throw new ApiFailure(404, "NOT_FOUND", "An order item no longer exists.");
-            OrderItem item = itemRows.getFirst();
-            if (!item.available() || (item.trackStock() && item.stockQuantity() != null && item.stockQuantity() < line.quantity())) {
-                throw conflict("ITEM_UNAVAILABLE", item.name() + " is not available in the requested quantity.");
-            }
+            OrderItem item = itemsById.get(line.itemId());
             Long lineId = jdbc.queryForObject("""
                     INSERT INTO order_line (order_id, item_id, item_name, quantity, unit_price, gst_rate, target_prep_seconds)
                     VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id
@@ -529,6 +533,20 @@ public class OrderService {
             int count = groupCounts.getOrDefault(groupId, 0);
             if (count < (int) group.get("min") || count > (int) group.get("max")) throw bad("INVALID_MODIFIER_SELECTION", "Choose the required number of options for each modifier group.");
         }
+    }
+
+    private List<OrderItem> lockMenuItems(List<Long> itemIds) {
+        return jdbc.query(connection -> {
+            PreparedStatement statement = connection.prepareStatement("""
+                    SELECT i.id, i.name, i.price, i.available, i.track_stock, i.stock_quantity, i.target_prep_seconds, c.gst_rate
+                    FROM menu_item i JOIN menu_category c ON c.id = i.category_id
+                    WHERE i.id = ANY(?) AND i.archived = false ORDER BY i.id FOR UPDATE OF i
+                    """);
+            statement.setArray(1, connection.createArrayOf("int8", itemIds.toArray()));
+            return statement;
+        }, (rs, row) -> new OrderItem(rs.getLong("id"), rs.getString("name"), rs.getBigDecimal("price"),
+                rs.getBoolean("available"), rs.getBoolean("track_stock"), rs.getObject("stock_quantity", Integer.class),
+                rs.getInt("target_prep_seconds"), rs.getBigDecimal("gst_rate")));
     }
 
     private BigDecimal orderTotal(long orderId) {
