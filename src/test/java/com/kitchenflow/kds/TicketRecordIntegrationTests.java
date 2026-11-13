@@ -35,6 +35,7 @@ class TicketRecordIntegrationTests {
     @Test
     @Transactional
     void stationRecordsFilterAndReturnAcceptedAndServedActorsAndDurations() {
+        TestReferences references = insertTestStationAndCategory();
         Long managerId = jdbc.queryForObject("SELECT id FROM app_user WHERE username = 'test-admin'", Long.class);
         int token = 80000 + Math.floorMod(UUID.randomUUID().hashCode(), 19999);
         Long orderId = jdbc.queryForObject("""
@@ -45,14 +46,14 @@ class TicketRecordIntegrationTests {
         Long ticketId = jdbc.queryForObject("""
                 INSERT INTO kitchen_ticket (order_id, station_id, status, target_seconds, accepted_at, accepted_by,
                     started_at, done_at, served_at, served_by, recall_count)
-                VALUES (?, 1, 'SERVED', 600, ?, ?, ?, ?, ?, ?, 2) RETURNING id
-                """, Long.class, orderId, Timestamp.from(now.minusSeconds(300)), managerId,
+                VALUES (?, ?, 'SERVED', 600, ?, ?, ?, ?, ?, ?, 2) RETURNING id
+                """, Long.class, orderId, references.stationId(), Timestamp.from(now.minusSeconds(300)), managerId,
                 Timestamp.from(now.minusSeconds(240)), Timestamp.from(now.minusSeconds(60)), Timestamp.from(now), managerId);
         ApiActor manager = new ApiActor(managerId, "test-admin", "MANAGER", 0);
 
-        List<TicketRecord> served = orders.stationTicketRecords(1, "SERVED", Integer.toString(token), manager);
-        List<TicketRecord> accepted = orders.stationTicketRecords(1, "ACCEPTED", Integer.toString(token), manager);
-        List<TicketRecord> all = orders.stationTicketRecords(1, "ALL", Integer.toString(token), manager);
+        List<TicketRecord> served = orders.stationTicketRecords(references.stationId(), "SERVED", Integer.toString(token), manager);
+        List<TicketRecord> accepted = orders.stationTicketRecords(references.stationId(), "ACCEPTED", Integer.toString(token), manager);
+        List<TicketRecord> all = orders.stationTicketRecords(references.stationId(), "ALL", Integer.toString(token), manager);
 
         assertThat(served).hasSize(1);
         assertThat(served.getFirst().ticketId()).isEqualTo(ticketId);
@@ -64,12 +65,13 @@ class TicketRecordIntegrationTests {
         assertThat(served.getFirst().recallCount()).isEqualTo(2);
         assertThat(accepted).isEmpty();
         assertThat(all).hasSize(1);
-        assertThat(orders.stationTicketRecords(1, "ALL", "missing", manager)).isEmpty();
+        assertThat(orders.stationTicketRecords(references.stationId(), "ALL", "missing", manager)).isEmpty();
     }
 
     @Test
     @Transactional
     void servingKeepsOrderReadyUntilExplicitCompletion() {
+        TestReferences references = insertTestStationAndCategory();
         Long managerId = jdbc.queryForObject("SELECT id FROM app_user WHERE username = 'test-admin'", Long.class);
         int token = 80000 + Math.floorMod(UUID.randomUUID().hashCode(), 19999);
         Long orderId = jdbc.queryForObject("""
@@ -80,8 +82,8 @@ class TicketRecordIntegrationTests {
         Long ticketId = jdbc.queryForObject("""
                 INSERT INTO kitchen_ticket (order_id, station_id, status, target_seconds, accepted_at, accepted_by,
                     started_at, done_at)
-                VALUES (?, 1, 'DONE', 600, ?, ?, ?, ?) RETURNING id
-                """, Long.class, orderId, Timestamp.from(now.minusSeconds(300)), managerId,
+                VALUES (?, ?, 'DONE', 600, ?, ?, ?, ?) RETURNING id
+                """, Long.class, orderId, references.stationId(), Timestamp.from(now.minusSeconds(300)), managerId,
                 Timestamp.from(now.minusSeconds(240)), Timestamp.from(now.minusSeconds(60)));
         ApiActor manager = new ApiActor(managerId, "test-admin", "MANAGER", 0);
 
@@ -98,11 +100,12 @@ class TicketRecordIntegrationTests {
     @Test
     @Transactional
     void createsIdempotentOrderAndCompletesPaidKitchenLifecycle() {
+        TestReferences references = insertTestStationAndCategory();
         Long managerId = jdbc.queryForObject("SELECT id FROM app_user WHERE username = 'test-admin'", Long.class);
         ApiActor manager = new ApiActor(managerId, "test-admin", "MANAGER", 0);
         String uniqueName = "Smoke item " + UUID.randomUUID().toString().substring(0, 8);
-        long itemId = catalog.saveMenuItem(null, new MenuItemRequest(uniqueName, "Food", new BigDecimal("10.00"),
-                List.of("Fry"), 240, true, 0, false, List.of()), manager, "order-smoke-123");
+        long itemId = catalog.saveMenuItem(null, new MenuItemRequest(uniqueName, references.categoryName(), new BigDecimal("10.00"),
+                List.of(references.stationName()), 240, true, 0, false, List.of()), manager, "order-smoke-123");
         CreateOrderRequest request = new CreateOrderRequest("TAKEAWAY", null,
                 List.of(new OrderLineRequest(itemId, 1, List.of())), "order lifecycle integration", false, null);
         String idempotencyKey = "order-smoke-" + UUID.randomUUID().toString().replace("-", "");
@@ -134,6 +137,7 @@ class TicketRecordIntegrationTests {
     @Test
     @Transactional
     void recallingReadyTicketIncrementsRecallCountAndReopensOrder() {
+        TestReferences references = insertTestStationAndCategory();
         Long managerId = jdbc.queryForObject("SELECT id FROM app_user WHERE username = 'test-admin'", Long.class);
         int token = 80000 + Math.floorMod(UUID.randomUUID().hashCode(), 19999);
         Long orderId = jdbc.queryForObject("""
@@ -142,8 +146,8 @@ class TicketRecordIntegrationTests {
                 """, Long.class, "KF-TEST-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16), businessDays.currentBusinessDay(), token, managerId);
         Long ticketId = jdbc.queryForObject("""
                 INSERT INTO kitchen_ticket (order_id, station_id, status, target_seconds, started_at, done_at)
-                VALUES (?, 1, 'DONE', 600, now() - interval '3 minutes', now()) RETURNING id
-                """, Long.class, orderId);
+                VALUES (?, ?, 'DONE', 600, now() - interval '3 minutes', now()) RETURNING id
+                """, Long.class, orderId, references.stationId());
         ApiActor manager = new ApiActor(managerId, "test-admin", "MANAGER", 0);
 
         orders.ticketAction(ticketId, "recall", new ActionRequest(0L), manager, "recall-test-123");
@@ -153,4 +157,19 @@ class TicketRecordIntegrationTests {
         assertThat(jdbc.queryForObject("SELECT recall_count FROM kitchen_ticket WHERE id = ?", Integer.class, ticketId)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT done_at FROM kitchen_ticket WHERE id = ?", Timestamp.class, ticketId)).isNull();
     }
+
+    private TestReferences insertTestStationAndCategory() {
+        String suffix = UUID.randomUUID().toString().replace("-", "");
+        String stationName = "Test Station " + suffix;
+        String categoryName = "Test Category " + suffix;
+        Long stationId = jdbc.queryForObject("""
+                INSERT INTO station (name, display_order) VALUES (?, 1) RETURNING id
+                """, Long.class, stationName);
+        Long categoryId = jdbc.queryForObject("""
+                INSERT INTO menu_category (name, gst_rate) VALUES (?, 5.00) RETURNING id
+                """, Long.class, categoryName);
+        return new TestReferences(stationId, categoryId, stationName, categoryName);
+    }
+
+    private record TestReferences(long stationId, long categoryId, String stationName, String categoryName) {}
 }
