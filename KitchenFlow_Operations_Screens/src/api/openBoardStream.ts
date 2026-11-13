@@ -23,7 +23,7 @@ export async function openBoardStream(signal: AbortSignal, onBoard: BoardUpdate)
         const data = event.split("\n").find((line) => line.startsWith("data:"))
         if (!data) return
         const board = JSON.parse(data.slice(5).trim()) as ApiBoard
-        onBoard({ preparing: board.preparing, ready: board.ready.map((entry) => entry.token) })
+        onBoard({ preparing: board.preparing, ready: board.ready })
       })
     }
   } finally {
