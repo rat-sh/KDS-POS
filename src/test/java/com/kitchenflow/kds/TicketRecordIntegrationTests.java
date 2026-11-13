@@ -12,8 +12,10 @@ import com.kitchenflow.kds.order.api.OrderRequests.OrderLineRequest;
 import com.kitchenflow.kds.order.api.OrderRequests.PaymentRequest;
 import com.kitchenflow.kds.order.api.OrderRequests.TicketRecord;
 import com.kitchenflow.kds.order.service.OrderService;
+import com.kitchenflow.kds.auth.service.AccessTokenService;
 import com.kitchenflow.kds.menu.api.MenuItemRequest;
 import com.kitchenflow.kds.menu.service.CatalogService;
+import com.kitchenflow.kds.user.api.UserRequest;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
@@ -48,6 +50,7 @@ class TicketRecordIntegrationTests {
     @Autowired private BusinessDayService businessDays;
     @Autowired private MockMvc mockMvc;
     @Autowired private ObjectMapper objectMapper;
+    @Autowired private AccessTokenService accessTokens;
 
     @Test
     @Transactional
@@ -282,6 +285,34 @@ class TicketRecordIntegrationTests {
         assertThat(kitchenOrder).doesNotContainKey("payment").doesNotContainKeys("amount", "cashier", "paidBy");
         assertThat(cashierOrder).containsKey("payment");
         assertThat(managerOrder).containsKey("payment");
+    }
+
+    @Test
+    @Transactional
+    void deactivationAndRoleChangeRevokeExistingAccessTokensImmediately() throws Exception {
+        Long adminId = jdbc.queryForObject("SELECT id FROM app_user WHERE username = 'test-admin'", Long.class);
+        ApiActor admin = new ApiActor(adminId, "test-admin", "MANAGER", 0);
+        String inactiveUsername = "inactive-" + UUID.randomUUID();
+        Long inactiveUserId = jdbc.queryForObject("""
+                INSERT INTO app_user (username, display_name, password_hash, role)
+                VALUES (?, ?, 'unused-test-hash', 'MANAGER') RETURNING id
+                """, Long.class, inactiveUsername, inactiveUsername);
+        String inactiveToken = accessTokens.issue(new ApiActor(inactiveUserId, inactiveUsername, "MANAGER", 0));
+        catalog.saveUser(inactiveUserId, new UserRequest(inactiveUsername, "MANAGER", null, false, null), admin, "revoke-inactive");
+
+        mockMvc.perform(get("/api/v1/orders").header("Authorization", "Bearer " + inactiveToken))
+                .andExpect(status().isUnauthorized());
+
+        String demotedUsername = "demoted-" + UUID.randomUUID();
+        Long demotedUserId = jdbc.queryForObject("""
+                INSERT INTO app_user (username, display_name, password_hash, role)
+                VALUES (?, ?, 'unused-test-hash', 'MANAGER') RETURNING id
+                """, Long.class, demotedUsername, demotedUsername);
+        String managerToken = accessTokens.issue(new ApiActor(demotedUserId, demotedUsername, "MANAGER", 0));
+        catalog.saveUser(demotedUserId, new UserRequest(demotedUsername, "CASHIER", null, true, null), admin, "revoke-demoted");
+
+        mockMvc.perform(get("/api/v1/orders").header("Authorization", "Bearer " + managerToken))
+                .andExpect(status().isUnauthorized());
     }
 
     @SuppressWarnings("unchecked")
