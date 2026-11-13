@@ -2,41 +2,52 @@ package com.kitchenflow.kds;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.kitchenflow.kds.common.error.ApiFailure;
 import com.kitchenflow.kds.common.security.ApiActor;
 import com.kitchenflow.kds.common.time.BusinessDayService;
-import com.kitchenflow.kds.common.error.ApiFailure;
-import com.kitchenflow.kds.order.api.OrderRequests.TicketRecord;
 import com.kitchenflow.kds.order.api.OrderRequests.ActionRequest;
 import com.kitchenflow.kds.order.api.OrderRequests.CancelRequest;
 import com.kitchenflow.kds.order.api.OrderRequests.CreateOrderRequest;
 import com.kitchenflow.kds.order.api.OrderRequests.OrderLineRequest;
-import com.kitchenflow.kds.order.service.OrderService;
-import com.kitchenflow.kds.menu.service.CatalogService;
-import com.kitchenflow.kds.menu.api.MenuItemRequest;
-import com.kitchenflow.kds.order.api.OrderRequests.CreateOrderRequest;
-import com.kitchenflow.kds.order.api.OrderRequests.OrderLineRequest;
 import com.kitchenflow.kds.order.api.OrderRequests.PaymentRequest;
+import com.kitchenflow.kds.order.api.OrderRequests.TicketRecord;
+import com.kitchenflow.kds.order.service.OrderService;
+import com.kitchenflow.kds.menu.api.MenuItemRequest;
+import com.kitchenflow.kds.menu.service.CatalogService;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.annotation.Transactional;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @Import(TestcontainersConfiguration.class)
 @SpringBootTest
+@AutoConfigureMockMvc
 class TicketRecordIntegrationTests {
     @Autowired private JdbcTemplate jdbc;
     @Autowired private OrderService orders;
     @Autowired private CatalogService catalog;
     @Autowired private BusinessDayService businessDays;
+    @Autowired private MockMvc mockMvc;
+    @Autowired private ObjectMapper objectMapper;
 
     @Test
     @Transactional
@@ -251,6 +262,39 @@ class TicketRecordIntegrationTests {
             assertThat(first.get().order()).containsKey("id");
             assertThat(second.get().order()).containsKey("id");
         }
+    }
+
+    @Test
+    @Transactional
+    void ordersProjectionHidesPaymentOnlyForKitchenRole() throws Exception {
+        Long managerId = jdbc.queryForObject("SELECT id FROM app_user WHERE username = 'test-admin'", Long.class);
+        int token = 80000 + Math.floorMod(UUID.randomUUID().hashCode(), 19999);
+        Long orderId = jdbc.queryForObject("""
+                INSERT INTO order_header (order_number, business_date, token, order_type, status, created_by)
+                VALUES (?, ?, ?, 'TAKEAWAY', 'IN_KITCHEN', ?) RETURNING id
+                """, Long.class, "KF-TEST-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16), businessDays.currentBusinessDay(), token, managerId);
+        jdbc.update("INSERT INTO payment (order_id, method, amount, paid_by) VALUES (?, 'CASH', 10.00, ?)", orderId, managerId);
+
+        Map<String, Object> kitchenOrder = fetchListedOrder(orderId, managerId, "KITCHEN");
+        Map<String, Object> cashierOrder = fetchListedOrder(orderId, managerId, "CASHIER");
+        Map<String, Object> managerOrder = fetchListedOrder(orderId, managerId, "MANAGER");
+
+        assertThat(kitchenOrder).doesNotContainKey("payment").doesNotContainKeys("amount", "cashier", "paidBy");
+        assertThat(cashierOrder).containsKey("payment");
+        assertThat(managerOrder).containsKey("payment");
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> fetchListedOrder(long orderId, long actorId, String role) throws Exception {
+        ApiActor actor = new ApiActor(actorId, "test-admin", role, 0);
+        var authentication = new UsernamePasswordAuthenticationToken(actor, null,
+                List.of(new SimpleGrantedAuthority("ROLE_" + role)));
+        String body = mockMvc.perform(get("/api/v1/orders").with(authentication(authentication)))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        Map<String, Object> page = objectMapper.readValue(body, new TypeReference<>() {});
+        return ((List<Map<String, Object>>) page.get("content")).stream()
+                .filter(order -> ((Number) order.get("id")).longValue() == orderId)
+                .findFirst().orElseThrow();
     }
 
     private TestReferences insertTestStationAndCategory() {

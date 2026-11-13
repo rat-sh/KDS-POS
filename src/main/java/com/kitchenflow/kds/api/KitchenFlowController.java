@@ -109,7 +109,7 @@ public class KitchenFlowController {
     }
 
     @GetMapping("/orders")
-    @PreAuthorize("hasAnyRole('CASHIER','KITCHEN','MANAGER')")
+    @PreAuthorize("hasAnyRole('CASHIER','KITCHEN','MANAGER','ADMIN')")
     public Map<String, Object> orders(@RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "100") int size,
             @AuthenticationPrincipal ApiActor actor) {
         return orders.orders(page, size, actor.role());
