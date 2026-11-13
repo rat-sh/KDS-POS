@@ -21,6 +21,7 @@ import com.kitchenflow.kds.config.api.ConfigRequests.StationPatch;
 import com.kitchenflow.kds.config.api.ConfigRequests.StationCreateRequest;
 import com.kitchenflow.kds.user.api.UserRequest;
 import com.kitchenflow.kds.inventory.api.StockAdjustmentRequest;
+import com.kitchenflow.kds.report.service.ReportService;
 import com.kitchenflow.kds.board.BoardStream;
 import com.kitchenflow.kds.common.config.KitchenFlowProperties;
 import com.kitchenflow.kds.common.security.ApiActor;
@@ -30,6 +31,7 @@ import com.kitchenflow.kds.auth.service.AuthService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import java.net.URI;
+import java.time.LocalDate;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -48,6 +50,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -59,14 +62,16 @@ public class KitchenFlowController {
     private final OrderService orders;
     private final BoardStream boardStream;
     private final KitchenFlowProperties properties;
+    private final ReportService reports;
 
     public KitchenFlowController(AuthService auth, CatalogService catalog, OrderService orders,
-            BoardStream boardStream, KitchenFlowProperties properties) {
+            BoardStream boardStream, KitchenFlowProperties properties, ReportService reports) {
         this.auth = auth;
         this.catalog = catalog;
         this.orders = orders;
         this.boardStream = boardStream;
         this.properties = properties;
+        this.reports = reports;
     }
 
     @PostMapping("/auth/login")
@@ -113,6 +118,18 @@ public class KitchenFlowController {
     public Map<String, Object> orders(@RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "100") int size,
             @AuthenticationPrincipal ApiActor actor) {
         return orders.orders(page, size, actor.role());
+    }
+
+    @GetMapping("/reports/summary")
+    @PreAuthorize("hasAnyRole('MANAGER','ADMIN')")
+    public Map<String, Object> reportSummary(
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to,
+            @RequestParam(defaultValue = "0") int topPage,
+            @RequestParam(defaultValue = "8") int topSize,
+            @RequestParam(defaultValue = "0") int cancellationPage,
+            @RequestParam(defaultValue = "20") int cancellationSize) {
+        return reports.summary(from, to, topPage, topSize, cancellationPage, cancellationSize);
     }
 
     @GetMapping("/orders/{id}")
