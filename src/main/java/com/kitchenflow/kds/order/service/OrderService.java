@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -128,9 +129,91 @@ public class OrderService {
         int safeSize = Math.clamp(size, 1, 200);
         String visibility = role.equals("KITCHEN") ? "WHERE status <> 'CREATED' " : "";
         List<Long> ids = jdbc.queryForList("SELECT id FROM order_header " + visibility + "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", Long.class, safeSize, (long) safePage * safeSize);
-        List<Map<String, Object>> content = ids.stream().map(id -> order(id, !role.equals("KITCHEN"))).toList();
+        List<Map<String, Object>> content = ordersByIds(ids, !role.equals("KITCHEN"));
         Integer total = jdbc.queryForObject("SELECT count(*) FROM order_header " + visibility, Integer.class);
         return map("content", content, "totalElements", total == null ? 0 : total, "totalPages", (total == null ? 0 : (int) Math.ceil((double) total / safeSize)));
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> ordersByIds(List<Long> ids, boolean includeFinancials) {
+        if (ids.isEmpty()) return List.of();
+        Map<Long, Map<String, Object>> ordersById = new LinkedHashMap<>();
+        for (OrderHeader header : queryOrderIds("""
+                SELECT id, order_number, token, table_name, status, order_type, created_at, paid_at, ready_at,
+                       completed_at, rush, priority, priority_reason, note, version, cancelled_at,
+                       cancelled_by, cancellation_reason
+                FROM order_header WHERE id = ANY(?)
+                """, ids, (rs, row) -> new OrderHeader(rs.getLong("id"), rs.getString("order_number"),
+                        rs.getInt("token"), rs.getString("table_name"), rs.getString("status"), rs.getString("order_type"),
+                        rs.getObject("created_at"), rs.getObject("paid_at"), rs.getObject("ready_at"),
+                        rs.getObject("completed_at"), rs.getBoolean("rush"), rs.getBoolean("priority"),
+                        rs.getString("priority_reason"), rs.getString("note"), rs.getLong("version"),
+                        rs.getObject("cancelled_at"), rs.getObject("cancelled_by"), rs.getString("cancellation_reason")))) {
+            Map<String, Object> value = map("id", header.id(), "orderNumber", header.orderNumber(),
+                    "token", header.token(), "table", header.tableName(), "status", header.status(),
+                    "orderType", header.orderType(), "createdAt", header.createdAt(), "paidAt", header.paidAt(),
+                    "readyAt", header.readyAt(), "completedAt", header.completedAt(), "rush", header.rush(),
+                    "priority", header.priority(), "priorityReason", header.priorityReason(), "note", header.note(),
+                    "lines", new ArrayList<>(), "tickets", new ArrayList<>(), "version", header.version());
+            if (header.cancelledAt() != null) value.put("cancellation", map("reason", header.cancellationReason(),
+                    "detail", "", "actor", header.cancelledBy(), "cancelledAt", header.cancelledAt()));
+            if (includeFinancials) value.put("payment", null);
+            ordersById.put(header.id(), value);
+        }
+
+        List<OrderLineRow> lineRows = queryOrderIds("""
+                SELECT order_id, id, item_id, quantity FROM order_line
+                WHERE order_id = ANY(?) ORDER BY order_id, id
+                """, ids, (rs, row) -> new OrderLineRow(rs.getLong("order_id"), rs.getLong("id"),
+                        rs.getLong("item_id"), rs.getInt("quantity")));
+        Map<Long, Map<String, Object>> linesById = new LinkedHashMap<>();
+        for (OrderLineRow line : lineRows) {
+            Map<String, Object> value = map("id", line.id(), "itemId", line.itemId(), "quantity", line.quantity(), "modifiers", new ArrayList<Long>());
+            linesById.put(line.id(), value);
+            ((List<Map<String, Object>>) ordersById.get(line.orderId()).get("lines")).add(value);
+        }
+
+        List<LineModifierRow> modifierRows = queryOrderIds("""
+                SELECT l.order_id, m.order_line_id, m.modifier_id
+                FROM order_line_modifier m JOIN order_line l ON l.id = m.order_line_id
+                WHERE l.order_id = ANY(?) ORDER BY l.order_id, m.order_line_id, m.modifier_id
+                """, ids, (rs, row) -> new LineModifierRow(rs.getLong("order_line_id"), rs.getLong("modifier_id")));
+        for (LineModifierRow modifier : modifierRows) {
+            ((List<Long>) linesById.get(modifier.orderLineId()).get("modifiers")).add(modifier.modifierId());
+        }
+
+        List<TicketOrderRow> ticketRows = queryOrderIds("""
+                SELECT order_id, id, station_id, status, accepted_at, served_at, started_at, done_at,
+                       cancelled_acknowledged_at, version
+                FROM kitchen_ticket WHERE order_id = ANY(?) ORDER BY order_id, station_id
+                """, ids, (rs, row) -> new TicketOrderRow(rs.getLong("order_id"), rs.getLong("id"),
+                        rs.getLong("station_id"), rs.getString("status"), rs.getObject("accepted_at"),
+                        rs.getObject("served_at"), rs.getObject("started_at"), rs.getObject("done_at"),
+                        rs.getObject("cancelled_acknowledged_at"), rs.getLong("version")));
+        for (TicketOrderRow ticket : ticketRows) {
+            ((List<Map<String, Object>>) ordersById.get(ticket.orderId()).get("tickets")).add(map(
+                    "id", ticket.id(), "stationId", ticket.stationId(), "status", ticket.status(),
+                    "acceptedAt", ticket.acceptedAt(), "servedAt", ticket.servedAt(), "startedAt", ticket.startedAt(),
+                    "doneAt", ticket.doneAt(), "cancelledAcknowledgedAt", ticket.cancelledAcknowledgedAt(),
+                    "version", ticket.version()));
+        }
+
+        if (includeFinancials) {
+            List<OrderPaymentRow> paymentRows = queryOrderIds("SELECT order_id, method, reference FROM payment WHERE order_id = ANY(?)",
+                    ids, (rs, row) -> new OrderPaymentRow(rs.getLong("order_id"), rs.getString("method"), rs.getString("reference")));
+            for (OrderPaymentRow payment : paymentRows) {
+                ordersById.get(payment.orderId()).put("payment", map("method", payment.method(), "reference", payment.reference()));
+            }
+        }
+        return ids.stream().map(ordersById::get).toList();
+    }
+
+    private <T> List<T> queryOrderIds(String sql, List<Long> ids, RowMapper<T> mapper) {
+        return jdbc.query(connection -> {
+            PreparedStatement statement = connection.prepareStatement(sql);
+            statement.setArray(1, connection.createArrayOf("int8", ids.toArray()));
+            return statement;
+        }, mapper);
     }
 
     @Transactional(readOnly = true)
@@ -653,5 +736,14 @@ public class OrderService {
             Integer stockQuantity, int targetSeconds, BigDecimal gstRate) {}
     private record TicketRow(long id, long orderId, long stationId, String status, long version) {}
     private record OrderLock(long id, String status, long version) {}
+    private record OrderHeader(long id, String orderNumber, int token, String tableName, String status,
+            String orderType, Object createdAt, Object paidAt, Object readyAt, Object completedAt, boolean rush,
+            boolean priority, String priorityReason, String note, long version, Object cancelledAt,
+            Object cancelledBy, String cancellationReason) {}
+    private record OrderLineRow(long orderId, long id, long itemId, int quantity) {}
+    private record LineModifierRow(long orderLineId, long modifierId) {}
+    private record TicketOrderRow(long orderId, long id, long stationId, String status, Object acceptedAt,
+            Object servedAt, Object startedAt, Object doneAt, Object cancelledAcknowledgedAt, long version) {}
+    private record OrderPaymentRow(long orderId, String method, String reference) {}
     private record RefundRow(String status, long version) {}
 }

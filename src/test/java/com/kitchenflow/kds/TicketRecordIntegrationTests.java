@@ -136,6 +136,7 @@ class TicketRecordIntegrationTests {
         var replay = orders.create(request, idempotencyKey, manager, "order-smoke-123");
         long orderId = ((Number) created.order().get("id")).longValue();
         assertThat(created.replayed()).isFalse();
+        assertThat(listedOrderFromPage(orderId, orders.orders(0, 200, "MANAGER"))).isEqualTo(created.order());
         assertThat(replay.replayed()).isTrue();
         assertThat(((Number) replay.order().get("id")).longValue()).isEqualTo(orderId);
 
@@ -350,6 +351,13 @@ class TicketRecordIntegrationTests {
         String body = mockMvc.perform(get("/api/v1/orders").with(authentication(authentication)))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
         Map<String, Object> page = objectMapper.readValue(body, new TypeReference<>() {});
+        return ((List<Map<String, Object>>) page.get("content")).stream()
+                .filter(order -> ((Number) order.get("id")).longValue() == orderId)
+                .findFirst().orElseThrow();
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> listedOrderFromPage(long orderId, Map<String, Object> page) {
         return ((List<Map<String, Object>>) page.get("content")).stream()
                 .filter(order -> ((Number) order.get("id")).longValue() == orderId)
                 .findFirst().orElseThrow();
