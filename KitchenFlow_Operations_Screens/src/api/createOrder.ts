@@ -1,4 +1,4 @@
-import type { Order, OrderLine, OrderType } from "../domain/core.types"
+import type { Order, OrderLine, OrderType, PaymentMethod } from "../domain/core.types"
 import type { ApiOrder } from "./api.types"
 import { mapApiOrder } from "./mapApiOrder"
 import { request } from "./request"
@@ -11,6 +11,7 @@ export async function createOrder(
   table?: string,
   priorityReason?: string,
   idempotencyKey = crypto.randomUUID(),
+  payment?: { method: PaymentMethod; amount: number; tendered?: number },
 ): Promise<Order> {
   const response = await request<ApiOrder>("/orders", {
     method: "POST",
@@ -26,6 +27,11 @@ export async function createOrder(
       note,
       priority: !!priorityReason,
       priorityReason,
+      payment: payment && {
+        method: payment.method.toUpperCase(),
+        amount: payment.amount.toFixed(2),
+        tendered: payment.tendered?.toFixed(2),
+      },
     }),
   })
   return mapApiOrder(response)

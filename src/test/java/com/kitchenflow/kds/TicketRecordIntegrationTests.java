@@ -34,10 +34,12 @@ import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.annotation.Transactional;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @Import(TestcontainersConfiguration.class)
@@ -127,7 +129,7 @@ class TicketRecordIntegrationTests {
         long itemId = catalog.saveMenuItem(null, new MenuItemRequest(uniqueName, references.categoryName(), new BigDecimal("10.00"),
                 List.of(references.stationName()), 240, true, 0, false, List.of()), manager, "order-smoke-123");
         CreateOrderRequest request = new CreateOrderRequest("TAKEAWAY", null,
-                List.of(new OrderLineRequest(itemId, 1, List.of())), "order lifecycle integration", false, null);
+                List.of(new OrderLineRequest(itemId, 1, List.of())), "order lifecycle integration", false, null, null);
         String idempotencyKey = "order-smoke-" + UUID.randomUUID().toString().replace("-", "");
 
         var created = orders.create(request, idempotencyKey, manager, "order-smoke-123");
@@ -244,9 +246,9 @@ class TicketRecordIntegrationTests {
         long secondItem = catalog.saveMenuItem(null, new MenuItemRequest("Second " + UUID.randomUUID(), references.categoryName(),
                 new BigDecimal("12.00"), List.of(references.stationName()), 240, true, 0, false, List.of()), manager, "create-race");
         CreateOrderRequest forward = new CreateOrderRequest("TAKEAWAY", null,
-                List.of(new OrderLineRequest(firstItem, 1, List.of()), new OrderLineRequest(secondItem, 1, List.of())), "create race", false, null);
+                List.of(new OrderLineRequest(firstItem, 1, List.of()), new OrderLineRequest(secondItem, 1, List.of())), "create race", false, null, null);
         CreateOrderRequest reverse = new CreateOrderRequest("TAKEAWAY", null,
-                List.of(new OrderLineRequest(secondItem, 1, List.of()), new OrderLineRequest(firstItem, 1, List.of())), "create race", false, null);
+                List.of(new OrderLineRequest(secondItem, 1, List.of()), new OrderLineRequest(firstItem, 1, List.of())), "create race", false, null, null);
         CountDownLatch ready = new CountDownLatch(2);
         CountDownLatch start = new CountDownLatch(1);
         try (var executor = Executors.newFixedThreadPool(2)) {
@@ -313,6 +315,31 @@ class TicketRecordIntegrationTests {
 
         mockMvc.perform(get("/api/v1/orders").header("Authorization", "Bearer " + managerToken))
                 .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void invalidPaymentRollsBackOrderAndReservedStock() throws Exception {
+        TestReferences references = insertTestStationAndCategory();
+        Long managerId = jdbc.queryForObject("SELECT id FROM app_user WHERE username = 'test-admin'", Long.class);
+        ApiActor manager = new ApiActor(managerId, "test-admin", "MANAGER", 0);
+        String itemName = "Stock item " + UUID.randomUUID();
+        long itemId = catalog.saveMenuItem(null, new MenuItemRequest(itemName, references.categoryName(), new BigDecimal("10.00"),
+                List.of(references.stationName()), 240, true, 5, true, List.of()), manager, "atomic-payment");
+        Integer initialOrders = jdbc.queryForObject("SELECT count(*) FROM order_header", Integer.class);
+        Integer initialStock = jdbc.queryForObject("SELECT stock_quantity FROM menu_item WHERE id = ?", Integer.class, itemId);
+        CreateOrderRequest request = new CreateOrderRequest("TAKEAWAY", null,
+                List.of(new OrderLineRequest(itemId, 2, List.of())), "payment rollback", false, null,
+                new PaymentRequest("CASH", new BigDecimal("0.00"), new BigDecimal("0.00"), null));
+
+        var authentication = new UsernamePasswordAuthenticationToken(manager, null,
+                List.of(new SimpleGrantedAuthority("ROLE_MANAGER")));
+        mockMvc.perform(post("/api/v1/orders").with(authentication(authentication))
+                        .header("Idempotency-Key", "payment-rollback-" + UUID.randomUUID())
+                        .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isUnprocessableEntity());
+
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM order_header", Integer.class)).isEqualTo(initialOrders);
+        assertThat(jdbc.queryForObject("SELECT stock_quantity FROM menu_item WHERE id = ?", Integer.class, itemId)).isEqualTo(initialStock);
     }
 
     @SuppressWarnings("unchecked")

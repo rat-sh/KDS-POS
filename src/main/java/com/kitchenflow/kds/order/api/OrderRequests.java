@@ -16,7 +16,7 @@ public final class OrderRequests {
 
     public record CreateOrderRequest(@NotBlank String orderType, String table,
             @NotEmpty List<@Valid OrderLineRequest> items, @Size(max = 500) String note,
-            boolean priority, @Size(max = 250) String priorityReason) {}
+            boolean priority, @Size(max = 250) String priorityReason, @Valid PaymentRequest payment) {}
     public record OrderLineRequest(@Min(1) long itemId, @Min(1) int quantity, List<Long> modifierIds) {}
     public record ActionRequest(Long expectedVersion) {}
     public record PaymentRequest(@NotBlank String method, @NotNull @DecimalMin("0.00") BigDecimal amount,
