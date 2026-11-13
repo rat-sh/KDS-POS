@@ -127,13 +127,17 @@ public class OrderService {
         int safeSize = Math.clamp(size, 1, 200);
         String visibility = role.equals("KITCHEN") ? "WHERE status <> 'CREATED' " : "";
         List<Long> ids = jdbc.queryForList("SELECT id FROM order_header " + visibility + "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", Long.class, safeSize, (long) safePage * safeSize);
-        List<Map<String, Object>> content = ids.stream().map(this::order).toList();
+        List<Map<String, Object>> content = ids.stream().map(id -> order(id, !role.equals("KITCHEN"))).toList();
         Integer total = jdbc.queryForObject("SELECT count(*) FROM order_header " + visibility, Integer.class);
         return map("content", content, "totalElements", total == null ? 0 : total, "totalPages", (total == null ? 0 : (int) Math.ceil((double) total / safeSize)));
     }
 
     @Transactional(readOnly = true)
     public Map<String, Object> order(long id) {
+        return order(id, true);
+    }
+
+    private Map<String, Object> order(long id, boolean includeFinancials) {
         var rows = jdbc.query("SELECT * FROM order_header WHERE id = ?", (rs, row) -> {
             long orderId = rs.getLong("id");
             List<Map<String, Object>> lines = jdbc.query("SELECT id, item_id, quantity FROM order_line WHERE order_id = ? ORDER BY id",
@@ -157,9 +161,11 @@ public class OrderService {
                 result.put("cancellation", map("reason", rs.getString("cancellation_reason"), "detail", "",
                         "actor", rs.getObject("cancelled_by"), "cancelledAt", rs.getObject("cancelled_at")));
             }
-            var payments = jdbc.query("SELECT method, reference FROM payment WHERE order_id = ?", (paymentRs, paymentRow) -> map(
-                    "method", paymentRs.getString("method"), "reference", paymentRs.getString("reference")), orderId);
-            result.put("payment", payments.isEmpty() ? null : payments.getFirst());
+            if (includeFinancials) {
+                var payments = jdbc.query("SELECT method, reference FROM payment WHERE order_id = ?", (paymentRs, paymentRow) -> map(
+                        "method", paymentRs.getString("method"), "reference", paymentRs.getString("reference")), orderId);
+                result.put("payment", payments.isEmpty() ? null : payments.getFirst());
+            }
             return result;
         }, id);
         if (rows.isEmpty()) throw new ApiFailure(404, "NOT_FOUND", "Order not found.");
