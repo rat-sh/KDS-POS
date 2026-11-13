@@ -113,6 +113,7 @@ public class OrderService {
                     Long.class, orderId, stationEntry.getKey(), targetByStation.get(stationEntry.getKey()));
             for (long lineId : stationEntry.getValue()) jdbc.update("INSERT INTO ticket_line (ticket_id, order_line_id) VALUES (?, ?)", ticketId, lineId);
         }
+        if (request.payment() != null) recordPayment(orderId, request.payment(), actor, correlationId);
         audit(actor, "ORDER", orderId, "ORDER_CREATED", null, correlationId);
         Map<String, Object> response = order(orderId);
         if (keyed) {
